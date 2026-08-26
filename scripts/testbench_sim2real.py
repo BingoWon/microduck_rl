@@ -71,6 +71,34 @@ def make_target_schedule(
     return targets
 
 
+def make_goal_schedule(
+    total_time: float,
+    step_angle: float,
+    hold_time: float = 4.0,
+) -> np.ndarray:
+    """Return one *goal position* per control step: a deterministic square wave
+    alternating 0 rad <-> ``step_angle`` every ``hold_time`` seconds.
+
+    Unlike ``make_target_schedule`` (a random walk fed as the policy's command
+    input, requiring an ONNX inference round-trip per tick), this is driven
+    directly as the actuator goal — open loop, no policy involved. Constant
+    goal-position steps are the one input insensitive to the 50 Hz policy
+    command rate, which is what keeps a sim step response comparable to a
+    hardware step response.
+    """
+    n_steps = int(round(total_time / CONTROL_DT))
+    steps_per_hold = int(round(hold_time / CONTROL_DT))
+    goals = np.zeros(n_steps, dtype=np.float32)
+    i = 0
+    high = False
+    while i < n_steps:
+        end = min(i + steps_per_hold, n_steps)
+        goals[i:end] = step_angle if high else 0.0
+        high = not high
+        i = end
+    return goals
+
+
 class PolicyRunner:
     def __init__(self, onnx_path: str, action_scale: float = 1.0):
         print(f"Loading policy: {onnx_path}  (action_scale={action_scale})")
@@ -101,11 +129,24 @@ class PolicyRunner:
 # ---------------------------------------------------------------------------
 
 
-def rollout_sim_bam(onnx_path: str, total_time: float, seed: int, action_scale: float) -> dict:
+def rollout_sim_bam(
+    onnx_path: str | None,
+    total_time: float,
+    seed: int,
+    action_scale: float,
+    kp: float = 200.0,
+    vin: float = 7.4,
+    goal_schedule: np.ndarray | None = None,
+) -> dict:
     """Sim rollout using bam's MujocoController on a vanilla MuJoCo step loop.
 
     Pros: 200 Hz inner-step logging, no torch/mjwarp.  Cons: not the exact
     actuator that was trained against (uses bam upstream, not mjlab's M6).
+
+    ``kp``/``vin`` are the firmware P-gain and supply voltage fed to the BAM
+    actuator (must match whatever the real bench was set to for the
+    comparison to mean anything). If ``goal_schedule`` is given, it is driven
+    open loop instead of the ONNX policy (``onnx_path`` may then be ``None``).
     """
     import mujoco  # local import so --mode real works without mujoco
 
@@ -120,8 +161,6 @@ def rollout_sim_bam(onnx_path: str, total_time: float, seed: int, action_scale: 
     with open(_resolve_json_path(None, "xl330", "m6")) as _f:
         DEFAULT_XL330_M6 = _json.load(_f)
 
-    VIN = 7.4
-    KP_FW = 200.0
     ACTUATOR_NAME = "1"
 
     # Build BAM's M6 model + XL330 voltage-controlled actuator.  The
@@ -130,8 +169,8 @@ def rollout_sim_bam(onnx_path: str, total_time: float, seed: int, action_scale: 
     # so MuJoCo's solver applies BAM's Stribeck+load+quadratic friction.
     bam_model = bam_models["m6"]()
     bam_model.set_actuator(bam_actuators["xl330"]())
-    bam_model.actuator.kp = KP_FW
-    bam_model.actuator.vin = VIN
+    bam_model.actuator.kp = kp
+    bam_model.actuator.vin = vin
     bam_model.load_parameters_from_dict(DEFAULT_XL330_M6)
 
     kt = bam_model.kt.value
@@ -146,12 +185,14 @@ def rollout_sim_bam(onnx_path: str, total_time: float, seed: int, action_scale: 
     for act in spec.actuators:
         act.set_to_motor()
         act.forcelimited = False
-        fl = VIN * kt / R
+        fl = vin * kt / R
         act.forcerange = (-fl, fl)
         act.gear = [1.0, 0, 0, 0, 0, 0]
     for joint in spec.joints:
         if joint.type == mujoco.mjtJoint.mjJNT_HINGE:
-            joint.damping = 0.0
+            # damping is a per-DOF [3, 1] array field in this MjSpec API version
+            # (a bare 0.0 raises a pybind11 TypeError); frictionloss stays scalar.
+            joint.damping = np.zeros((3, 1))
             joint.frictionloss = 0.0
 
     model = spec.compile()
@@ -168,27 +209,47 @@ def rollout_sim_bam(onnx_path: str, total_time: float, seed: int, action_scale: 
 
     bam_ctrl = MujocoController(bam_model, ACTUATOR_NAME, model, data)
     bam_ctrl.reset(data.qpos)
+    act_id = bam_ctrl.act_indexes[0]
 
-    runner = PolicyRunner(onnx_path, action_scale=action_scale)
-    policy_targets = make_target_schedule(total_time, seed=seed)
+    if goal_schedule is None:
+        runner = PolicyRunner(onnx_path, action_scale=action_scale)
+        policy_targets = make_target_schedule(total_time, seed=seed)
+    else:
+        runner = None
+        policy_targets = goal_schedule
     decim = int(round(CONTROL_DT / SIM_DT))
 
     # Logging at SIM_DT (200 Hz): decim samples per policy step.
     N_log = len(policy_targets) * decim
     rec = {k: np.zeros(N_log, dtype=np.float32)
-           for k in ("t", "target", "q", "qd", "action", "ctrl")}
+           for k in ("t", "target", "q", "qd", "action", "ctrl", "current_a")}
 
     t = 0.0
     log_i = 0
     for policy_i, target in enumerate(policy_targets):
         q = float(data.qpos[qpos_id])
         qd = float(data.qvel[dof_id])
-        goal = runner.step(q, qd, float(target))
-        action_raw = float(runner.last_action[0])
+        if runner is not None:
+            goal = runner.step(q, qd, float(target))
+            action_raw = float(runner.last_action[0])
+        else:
+            # Open-loop: the goal schedule itself is the commanded position,
+            # no policy in the loop.
+            goal = float(target)
+            action_raw = 0.0
 
         for _ in range(decim):
             q = float(data.qpos[qpos_id])
             dq = float(data.qvel[dof_id])
+
+            # BAM owns control/torque/friction: set the target, then update()
+            # writes torque to data.ctrl and pushes friction/damping onto the
+            # dof so MuJoCo's solver applies them on the next step. Modelled
+            # current [A] follows directly from tau = kt * I.
+            bam_ctrl.set_q_target(ACTUATOR_NAME, goal)
+            bam_ctrl.update()
+            motor_torque = float(data.ctrl[act_id])
+            current_a = motor_torque / kt
 
             # ---- log at 200 Hz ----
             rec["t"][log_i] = t
@@ -197,13 +258,9 @@ def rollout_sim_bam(onnx_path: str, total_time: float, seed: int, action_scale: 
             rec["qd"][log_i] = dq
             rec["action"][log_i] = action_raw
             rec["ctrl"][log_i] = goal
+            rec["current_a"][log_i] = current_a
             log_i += 1
 
-            # BAM owns control/torque/friction: set the target, then update()
-            # writes torque to data.ctrl and pushes friction/damping onto the
-            # dof so MuJoCo's solver applies them on the next step.
-            bam_ctrl.set_q_target(ACTUATOR_NAME, goal)
-            bam_ctrl.update()
             mujoco.mj_step(model, data)
             t += SIM_DT
 
@@ -297,7 +354,7 @@ def rollout_sim_mjlab(onnx_path: str, total_time: float, seed: int, action_scale
 
 
 def rollout_real(
-    onnx_path: str,
+    onnx_path: str | None,
     total_time: float,
     seed: int,
     port: str,
@@ -305,6 +362,7 @@ def rollout_real(
     baudrate: int,
     kp: int,
     action_scale: float,
+    goal_schedule: np.ndarray | None = None,
 ) -> dict:
     from rustypot import Xl330PyController
 
@@ -327,13 +385,17 @@ def rollout_real(
     ctrl.write_torque_enable(motor_id, True)
     time.sleep(1.0)  # let it settle at zero
 
-    runner = PolicyRunner(onnx_path, action_scale=action_scale)
-    policy_targets = make_target_schedule(total_time, seed=seed)
+    if goal_schedule is None:
+        runner = PolicyRunner(onnx_path, action_scale=action_scale)
+        policy_targets = make_target_schedule(total_time, seed=seed)
+    else:
+        runner = None
+        policy_targets = goal_schedule
 
     decim = int(round(CONTROL_DT / LOG_DT))  # samples per policy tick (4 at 200 Hz / 50 Hz)
     N_log = len(policy_targets) * decim
     rec = {k: np.zeros(N_log, dtype=np.float32)
-           for k in ("t", "target", "q", "qd", "action", "ctrl")}
+           for k in ("t", "target", "q", "qd", "action", "ctrl", "current_a")}
 
     def _scalar(x) -> float:
         if isinstance(x, (list, tuple)):
@@ -356,9 +418,17 @@ def rollout_real(
             qd = _scalar(ctrl.read_present_velocity(motor_id)) * DXL_VEL_TICK_TO_RAD_S
         except Exception:
             qd = (q - prev_q) / CONTROL_DT
+        # Present Current, addr 126: unit = 1 mA/LSB (Dynamixel X-series/XL330
+        # control table) -> amps.
+        current_a = _scalar(ctrl.read_present_current(motor_id)) * 0.001
 
-        goal = runner.step(q, qd, target_f)
-        action_raw = float(runner.last_action[0])
+        if runner is not None:
+            goal = runner.step(q, qd, target_f)
+            action_raw = float(runner.last_action[0])
+        else:
+            # Open-loop: drive the goal schedule directly, no policy involved.
+            goal = target_f
+            action_raw = 0.0
         # ctrl.write_goal_position(motor_id, float(np.clip(goal, -MAX_ANGLE, MAX_ANGLE)))
         ctrl.write_goal_position(motor_id, float(goal))
 
@@ -369,6 +439,7 @@ def rollout_real(
         rec["qd"][log_i] = qd
         rec["action"][log_i] = action_raw
         rec["ctrl"][log_i] = goal
+        rec["current_a"][log_i] = current_a
         prev_q = q
         log_i += 1
 
@@ -382,6 +453,7 @@ def rollout_real(
                 qd = _scalar(ctrl.read_present_velocity(motor_id)) * DXL_VEL_TICK_TO_RAD_S
             except Exception:
                 qd = (q - prev_q) / LOG_DT
+            current_a = _scalar(ctrl.read_present_current(motor_id)) * 0.001
             prev_q = q
 
             rec["t"][log_i] = time.perf_counter() - t_start
@@ -390,6 +462,7 @@ def rollout_real(
             rec["qd"][log_i] = qd
             rec["action"][log_i] = action_raw
             rec["ctrl"][log_i] = goal
+            rec["current_a"][log_i] = current_a
             log_i += 1
 
         # Live status on every new segment plus a heartbeat.
@@ -545,15 +618,28 @@ def main():
                     help="Sim backend: 'bam' uses bam.MujocoController on a vanilla "
                          "mujoco loop (200 Hz log, lightweight); 'mjlab' boots the actual "
                          "make_testbench_env_cfg() mjlab env with its BamM6Actuator (50 Hz log).")
-    ap.add_argument("--onnx", type=str, help="Path to trained ONNX policy")
+    ap.add_argument("--onnx", type=str,
+                    help="Path to trained ONNX policy. Required unless --trajectory step.")
     ap.add_argument("--out", type=str, help="Output .npz log file")
     ap.add_argument("--duration", type=float, default=30.0, help="Total time [s]")
     ap.add_argument("--seed", type=int, default=0, help="Target schedule seed")
+    ap.add_argument("--trajectory", choices=["policy", "step"], default="policy",
+                    help="'policy' (default, unchanged) replays --onnx on a random target "
+                         "schedule. 'step' drives an open-loop constant-goal-position square "
+                         "wave directly (no ONNX/observation round-trip) — the shape needed "
+                         "for bench step-response / current characterization, since it is "
+                         "insensitive to the 50 Hz policy tick.")
+    ap.add_argument("--step-angle", type=float, default=math.radians(20.0),
+                    help="Open-loop step amplitude [rad] for --trajectory step "
+                         "(square wave alternating 0 <-> step-angle).")
     # real-only
     ap.add_argument("--port", type=str, default="/dev/ttyUSB0")
     ap.add_argument("--motor-id", type=int, default=1)
     ap.add_argument("--baudrate", type=int, default=1_000_000)
-    ap.add_argument("--kp", type=int, default=200, help="XL330 position P gain")
+    ap.add_argument("--kp", type=int, default=200,
+                    help="XL330 position P gain (firmware kp_fw). Used to set the real "
+                         "servo's P-gain in --mode real, and the BAM actuator's kp_fw in "
+                         "--mode sim --sim-backend bam (the default sim backend).")
     ap.add_argument("--action-scale", type=float, default=1.0,
                     help="Multiplier applied to the policy action before offsetting "
                          "by the default pose (must match training env action scale)")
@@ -567,7 +653,11 @@ def main():
                          "(run with: python -m bam.plot --logdir <dir> --actuator xl330)")
     ap.add_argument("--bam-mass", type=float, default=TESTBENCH_ARM_MASS, help="Payload mass [kg]")
     ap.add_argument("--bam-length", type=float, default=0.1, help="Arm length [m]")
-    ap.add_argument("--bam-vin", type=float, default=7.4, help="Supply voltage [V]")
+    ap.add_argument("--bam-vin", type=float, default=7.4,
+                    help="Supply voltage [V]. Used for --to-bam log metadata, and as the "
+                         "BAM actuator's vin in --mode sim --sim-backend bam. A real bench's "
+                         "supply sags under load, so set this to match if you want a fair "
+                         "comparison rather than leaving it at the nominal default.")
 
     args = ap.parse_args()
 
@@ -586,17 +676,38 @@ def main():
         )
         return
 
-    if not (args.mode and args.onnx and args.out):
-        ap.error("--mode, --onnx and --out are required for a rollout")
+    if not (args.mode and args.out):
+        ap.error("--mode and --out are required for a rollout")
+    if args.trajectory == "policy" and not args.onnx:
+        ap.error("--onnx is required unless --trajectory step")
+
+    goal_schedule = (
+        make_goal_schedule(args.duration, step_angle=args.step_angle)
+        if args.trajectory == "step" else None
+    )
 
     if args.mode == "sim":
-        sim_fn = rollout_sim_mjlab if args.sim_backend == "mjlab" else rollout_sim_bam
-        rec = sim_fn(args.onnx, args.duration, args.seed, args.action_scale)
+        if args.sim_backend == "mjlab":
+            if goal_schedule is not None:
+                ap.error("--trajectory step is not supported with --sim-backend mjlab "
+                         "(testbench task not yet migrated to plumb an open-loop goal "
+                         "schedule); use the default --sim-backend bam.")
+            if args.kp != 200 or args.bam_vin != 7.4:
+                print(f"WARNING: --sim-backend mjlab does not wire --kp/--bam-vin into its "
+                      f"BAM actuator (testbench task not yet migrated); requested "
+                      f"kp={args.kp} vin={args.bam_vin} are IGNORED. Use the default "
+                      f"--sim-backend bam for a gain-accurate comparison.")
+            rec = rollout_sim_mjlab(args.onnx, args.duration, args.seed, args.action_scale)
+        else:
+            rec = rollout_sim_bam(
+                args.onnx, args.duration, args.seed, args.action_scale,
+                kp=float(args.kp), vin=args.bam_vin, goal_schedule=goal_schedule,
+            )
     else:
         rec = rollout_real(
             args.onnx, args.duration, args.seed,
             args.port, args.motor_id, args.baudrate, args.kp,
-            args.action_scale,
+            args.action_scale, goal_schedule=goal_schedule,
         )
 
     out = Path(args.out)
@@ -605,6 +716,8 @@ def main():
     err = rec["q"] - rec["target"]
     print(f"\nSaved {len(rec['t'])} samples to {out}")
     print(f"  tracking MAE: {float(np.mean(np.abs(err))):.4f} rad ({math.degrees(float(np.mean(np.abs(err)))):.2f}°)")
+    if "current_a" in rec:
+        print(f"  peak current: {float(np.max(np.abs(rec['current_a']))):.3f} A")
 
 
 if __name__ == "__main__":

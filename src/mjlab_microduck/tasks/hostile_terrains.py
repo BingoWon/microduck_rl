@@ -5,8 +5,10 @@ Plain-English glossary used across this file:
   * "difficulty": a number from 0 to 1. Every obstacle size below is interpolated with it
     (0 = the easy end, 1 = the hard end). The curriculum ("ladder") decides which
     difficulty row each robot lives on.
-  * "heightfield": ground described as a grid of heights (one collision object, cheap).
-    Box terrains are made of many boxes (one collision object per box, expensive).
+  * "heightfield": ground described as a grid of heights (one collision object, cheap to
+    build). Its cell size matters for GPU speed: run A (2026-08-29) used 2 cm cells (40 000
+    per patch) and trained at 8 s/iteration instead of 1.3 s; 4–10 cm cells fixed it.
+    Box terrains are made of many boxes (one collision object per box).
 
 These configs are the SAME objects previewed by `notes/tools/duck_terrain.py`, so the
 studio pictures are what the GPU environment compiles.
@@ -67,19 +69,19 @@ def hostile_subterrains(scale: float = 1.0) -> dict[str, terrain_gen.SubTerrainC
         "stairs": terrain_gen.BoxPyramidStairsTerrainCfg(
             proportion=0.20, step_height_range=(0.01 * s, 0.03 * s), step_width=0.12,
             platform_width=0.8, border_width=0.2),
-        # Flat stones 6–16 cm wide, 0.8 cm → 2.5 cm high (heightfield, 2 cm resolution).
+        # Flat stones 6–16 cm wide, 0.8 cm → 2.5 cm high (heightfield, 4 cm cells).
         "stones": terrain_gen.HfDiscreteObstaclesTerrainCfg(
             proportion=0.20, obstacle_width_range=(0.06, 0.16),
             obstacle_height_range=(0.008 * s, 0.025 * s), num_obstacles=140,
-            obstacle_height_mode="fixed", horizontal_scale=0.02, vertical_scale=0.001,
+            obstacle_height_mode="fixed", horizontal_scale=0.04, vertical_scale=0.001,
             platform_width=0.6, border_width=0.2, origin_z_offset=0.025 * s + 0.002),
-        # Rubble: bumps every 6 cm, ±0.5 cm → ±2 cm.
+        # Rubble: bumps every 8 cm, ±0.5 cm → ±2 cm (4 cm cells).
         "rubble": HfRubbleTerrainCfg(
             proportion=0.15, noise_range=(-0.02 * s, 0.02 * s), noise_range_easy=(-0.005 * s, 0.005 * s),
-            noise_step=0.002, downsampled_scale=0.06, horizontal_scale=0.02, vertical_scale=0.001,
+            noise_step=0.002, downsampled_scale=0.08, horizontal_scale=0.04, vertical_scale=0.001,
             border_width=0.2),
         # Pyramid slopes: 3° → 9° (rise/run 0.05 → 0.16).
         "slopes": terrain_gen.HfPyramidSlopedTerrainCfg(
             proportion=0.15, slope_range=(0.05 * s, 0.16 * s), platform_width=0.8,
-            horizontal_scale=0.05, vertical_scale=0.001),
+            horizontal_scale=0.1, vertical_scale=0.001),
     }

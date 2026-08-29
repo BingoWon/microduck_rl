@@ -8007,3 +8007,49 @@ def flb_swing_foot_clear(
     reward = torch.exp(-((z - target) / std) ** 2)
     stance_found, _ = _fl_feet_found(env, sensor_name, side)
     return reward * stance_found * _smoothstep(alpha, lo, hi)
+
+
+# =============================================================================
+# Hostile terrain (2026-08-29): performance-based terrain ladder
+# =============================================================================
+
+
+def hostile_terrain_levels(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    min_tracking: float = 0.55,
+    reward_name: str = "track_linear_velocity",
+) -> dict[str, torch.Tensor]:
+    """Move each resetting robot up or down the terrain ladder from how its episode went.
+
+    Rule (plain English):
+      * the episode ended by a FALL (``fell_over`` termination)        → one row DOWN;
+      * the episode ran its full length AND the robot earned at least ``min_tracking`` of the
+        maximum speed-tracking reward on average                      → one row UP;
+      * anything else (e.g. survived but stood still under a command)  → stay.
+
+    Called by the curriculum manager at reset, BEFORE the termination flags and reward sums of
+    those envs are cleared, so both are still the finished episode's values. Robots that reach
+    the top row are re-dealt to a random row (mjlab's ``update_env_origins`` behaviour), which
+    keeps the hardest rows populated without trapping everyone there.
+
+    Logged as ``Curriculum/terrain_levels/{mean,max,promoted,demoted}``.
+    """
+    terrain = env.scene.terrain
+    assert terrain is not None
+    fell = env.termination_manager.get_term("fell_over")[env_ids]
+    timed_out = env.termination_manager.get_term("time_out")[env_ids]
+    sums = env.reward_manager._episode_sums[reward_name][env_ids]  # reward·s over the episode
+    weight = float(env.reward_manager.get_term_cfg(reward_name).weight)
+    max_sum = max(weight, 1e-6) * float(env.max_episode_length_s)
+    tracking = sums / max_sum  # 0..1: fraction of the best possible tracking reward
+    move_up = timed_out & (~fell) & (tracking >= min_tracking)
+    move_down = fell & (~move_up)
+    terrain.update_env_origins(env_ids, move_up, move_down)
+    levels = terrain.terrain_levels.float()
+    return {
+        "mean": torch.mean(levels),
+        "max": torch.max(levels),
+        "promoted": move_up.float().mean(),
+        "demoted": move_down.float().mean(),
+    }

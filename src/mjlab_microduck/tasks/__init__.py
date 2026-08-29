@@ -118,6 +118,8 @@ for _name, _kw in {
     "FinetuneFeet": dict(finetune=True, feet=True, track=False),    # B: + foot 3.5 cm, hip roll loose
     "ScratchFeet": dict(finetune=False, feet=True, track=False),    # C: same env as B, from scratch
     "FinetuneFeetTrack": dict(finetune=True, feet=True, track=True),  # D: B + stricter speed tracking
+    "FinetuneFeetProgress": dict(finetune=True, feet=True, progress=True),  # E: B + anti-circling (run A lesson)
+    "ScratchFeetProgress": dict(finetune=False, feet=True, progress=True),  # C': from scratch, same env as E
 }.items():
     register_mjlab_task(
         task_id=f"Mjlab-Hostile-{_name}-MicroDuck",

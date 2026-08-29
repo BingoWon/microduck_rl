@@ -102,3 +102,21 @@ def test_ladder_rule():
     assert calls["up"].tolist() == [False, True, False, False]
     assert calls["down"].tolist() == [True, False, False, False]
     assert out["promoted"].item() == pytest.approx(0.25) and out["demoted"].item() == pytest.approx(0.25)
+
+
+def test_progress_variant():
+    cfg = make_microduck_velocity_hostile_env_cfg(finetune=True, feet=True, progress=True)
+    assert cfg.curriculum["terrain_levels"].params["min_progress"] > 0
+    assert cfg.rewards["track_angular_velocity"].params["std"] < np.sqrt(0.5)
+    base = make_microduck_velocity_hostile_env_cfg(finetune=True, feet=True)
+    assert base.curriculum["terrain_levels"].params["min_progress"] == 0.0
+
+
+def test_ladder_rule_progress_blocks_circling():
+    env, calls = _fake_env([False, False, False], [True, True, True], [0.9, 0.9, 0.9])
+    # robot 0 walked 3 m (cmd 0.3 m/s → needs 0.3·0.3·20 = 1.8 m), robot 1 circled (0.2 m), robot 2 was told to stand
+    robot = SimpleNamespace(data=SimpleNamespace(root_link_pos_w=torch.tensor([[3.0, 0.0, 0.1], [0.2, 0.0, 0.1], [0.1, 0.0, 0.1]])))
+    env.scene = type("Scene", (), {"terrain": env.scene.terrain, "env_origins": torch.zeros(3, 3), "__getitem__": lambda self, k: robot})()
+    env.command_manager = SimpleNamespace(get_command=lambda n: torch.tensor([[0.3, 0.0, 0.0], [0.3, 0.0, 0.0], [0.0, 0.0, 0.0]]))
+    microduck_mdp.hostile_terrain_levels(env, torch.arange(3), min_tracking=0.55, min_progress=0.3)
+    assert calls["up"].tolist() == [True, False, True]

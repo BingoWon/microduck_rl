@@ -22,6 +22,11 @@ recipe that produced the shipped `alpha_walking` policy) and changes four things
      joint that can adapt sideways to uneven ground.
    - `track`: the speed-tracking reward is made stricter (std 0.32 → 0.22 m/s) so "stand
      still instead of walking" earns less. Riskier; tested separately.
+   - `progress` (added after run A, 2026-08-30): run A learned to walk in circles on the flat
+     spawn platform — speed tracking is measured in the robot's own frame, so circling tracks
+     perfectly and survives, and the ladder promoted it. Two counters: promotion now also
+     requires real displacement (≥ 30 % of the commanded distance), and turning while
+     commanded straight costs more (yaw-tracking std 0.71 → 0.39 rad/s).
 
 4. **Fine-tuning mode.** When resuming from the shipped policy's checkpoint, every
    iteration-keyed curriculum (action-rate tax ramp, standing fraction, head ranges, CoM
@@ -50,6 +55,8 @@ from mjlab_microduck.tasks.microduck_velocity_env_cfg import (
 FOOT_TARGET_HEIGHT = 0.035   # m, was 0.02
 HIP_ROLL_STD = 0.12          # rad, was 0.05 (walking / running regimes only; standing stays tight)
 TRACK_LIN_STD = math.sqrt(0.05)  # m/s, was sqrt(0.1)
+TRACK_ANG_STD = math.sqrt(0.15)  # rad/s, was sqrt(0.5): a 0.3 rad/s unwanted turn costs 45 % instead of 16 % of the yaw reward
+MIN_PROGRESS = 0.3               # promotion needs ≥ 30 % of the commanded distance actually covered (anti-circling)
 # Terrain ladder.
 LADDER_ROWS = 8              # difficulty rows: row r has difficulty in [r/8, (r+1)/8)
 PATCH_SIZE = 4.0             # m, one terrain patch (the base env used 8 m; 4 m = 4× fewer boxes)
@@ -88,6 +95,7 @@ def make_microduck_velocity_hostile_env_cfg(
     finetune: bool = True,
     feet: bool = True,
     track: bool = False,
+    progress: bool = False,
     terrain_scale: float = 1.0,
     max_init_level: int | None = None,
 ):
@@ -100,7 +108,7 @@ def make_microduck_velocity_hostile_env_cfg(
     cfg.scene.terrain.max_init_terrain_level = max_init_level
     cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
         func=microduck_mdp.hostile_terrain_levels,
-        params={"min_tracking": MIN_TRACKING_TO_PROMOTE},
+        params={"min_tracking": MIN_TRACKING_TO_PROMOTE, "min_progress": MIN_PROGRESS if progress else 0.0},
     )
     pose_range = cfg.events["reset_base"].params["pose_range"]
     pose_range["x"] = (-SPAWN_XY, SPAWN_XY)
@@ -116,6 +124,9 @@ def make_microduck_velocity_hostile_env_cfg(
             cfg.rewards["pose"].params[regime] = stds
     if track:
         cfg.rewards["track_linear_velocity"].params["std"] = TRACK_LIN_STD
+    if progress:
+        # anti-circling, part 2: turning while commanded straight must cost more (run A lesson)
+        cfg.rewards["track_angular_velocity"].params["std"] = TRACK_ANG_STD
 
     # --- fine-tune: curricula at their final stage from step 0 -------------------------------
     if finetune:

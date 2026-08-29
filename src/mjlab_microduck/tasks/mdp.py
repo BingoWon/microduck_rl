@@ -8019,6 +8019,9 @@ def hostile_terrain_levels(
     env_ids: torch.Tensor,
     min_tracking: float = 0.55,
     reward_name: str = "track_linear_velocity",
+    min_progress: float = 0.0,
+    command_name: str = "twist",
+    still_threshold: float = 0.05,
 ) -> dict[str, torch.Tensor]:
     """Move each resetting robot up or down the terrain ladder from how its episode went.
 
@@ -8033,6 +8036,13 @@ def hostile_terrain_levels(
     the top row are re-dealt to a random row (mjlab's ``update_env_origins`` behaviour), which
     keeps the hardest rows populated without trapping everyone there.
 
+    ``min_progress`` (run A lesson, 2026-08-30): speed tracking is measured in the robot's own frame,
+    so a robot walking in circles on the flat spawn platform tracks perfectly, survives, and gets
+    promoted — run A learned exactly that (turns ~9°/s under a straight command). With
+    ``min_progress`` > 0, promotion also requires the robot to have moved at least
+    ``min_progress × |commanded speed| × episode length`` metres away from where it started
+    (skipped when the command is "stand still", |v_cmd| < ``still_threshold``).
+
     Logged as ``Curriculum/terrain_levels/{mean,max,promoted,demoted}``.
     """
     terrain = env.scene.terrain
@@ -8044,6 +8054,15 @@ def hostile_terrain_levels(
     max_sum = max(weight, 1e-6) * float(env.max_episode_length_s)
     tracking = sums / max_sum  # 0..1: fraction of the best possible tracking reward
     move_up = timed_out & (~fell) & (tracking >= min_tracking)
+    if min_progress > 0.0:
+        asset = env.scene["robot"]
+        command = env.command_manager.get_command(command_name)
+        assert command is not None
+        v_cmd = torch.norm(command[env_ids, :2], dim=1)
+        moved = torch.norm(asset.data.root_link_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1)
+        needed = min_progress * v_cmd * float(env.max_episode_length_s)
+        progressed = (moved >= needed) | (v_cmd < still_threshold)
+        move_up = move_up & progressed
     move_down = fell & (~move_up)
     terrain.update_env_origins(env_ids, move_up, move_down)
     levels = terrain.terrain_levels.float()

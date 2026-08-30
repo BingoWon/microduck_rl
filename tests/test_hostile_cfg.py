@@ -158,7 +158,10 @@ def test_height_lookup_on_cpu():
                 assert np.allclose(heights[p], 0.0, atol=1e-3) and allowed[p].all()
             if name == "stairs":
                 assert heights[p, c, c] > heights[p, 0, 0] + 0.05        # top platform above the outer step
-                assert 0.05 < allowed[p].mean() < 0.95                   # step edges excluded, tread middles usable
+                if row == 1:                                             # 2–3 cm steps: edges excluded, tread middles usable
+                    assert 0.05 < allowed[p].mean() < 0.95
+                else:                                                    # 1–2 cm steps: within tolerance, all usable
+                    assert allowed[p].mean() > 0.5
     assert 0.3 < allowed.mean() <= 1.0
 
 

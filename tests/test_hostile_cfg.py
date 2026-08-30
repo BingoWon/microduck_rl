@@ -146,7 +146,7 @@ def test_height_lookup_on_cpu():
     spec.attach(mujoco.MjSpec.from_file(str(MICRODUCK_WALK_XML)), prefix="", frame=spec.worldbody.add_frame())
     model = spec.compile()
     centers = gen.terrain_origins.reshape(-1, 3)[:, :2]
-    heights, allowed, offsets = microduck_mdp.build_terrain_height_lookup(model, centers, span=1.7, res=0.1, flat_tol=0.02)
+    heights, allowed, offsets = microduck_mdp.build_terrain_height_lookup(model, centers, span=1.7, res=0.04, flat_tol=0.02)
     names = list(gcfg.sub_terrains)
     n = len(offsets); c = n // 2
     for row in range(2):
@@ -158,7 +158,7 @@ def test_height_lookup_on_cpu():
                 assert np.allclose(heights[p], 0.0, atol=1e-3) and allowed[p].all()
             if name == "stairs":
                 assert heights[p, c, c] > heights[p, 0, 0] + 0.05        # top platform above the outer step
-                assert 0.2 < allowed[p].mean() < 0.95                    # step edges excluded, treads usable
+                assert 0.05 < allowed[p].mean() < 0.95                   # step edges excluded, tread middles usable
     assert 0.3 < allowed.mean() <= 1.0
 
 

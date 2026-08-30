@@ -120,6 +120,8 @@ for _name, _kw in {
     "FinetuneFeetTrack": dict(finetune=True, feet=True, track=True),  # D: B + stricter speed tracking
     "FinetuneFeetProgress": dict(finetune=True, feet=True, progress=True),  # E: B + anti-circling (run A lesson)
     "ScratchFeetProgress": dict(finetune=False, feet=True, progress=True),  # C': from scratch, same env as E
+    "V2Scratch": dict(finetune=False, v2=True),      # 2026-08-30 menu v2, spawn anywhere, no-progress demotion, strict tracking
+    "V2Finetune": dict(finetune=True, v2=True),
 }.items():
     register_mjlab_task(
         task_id=f"Mjlab-Hostile-{_name}-MicroDuck",

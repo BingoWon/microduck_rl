@@ -42,10 +42,11 @@ import dataclasses
 import math
 
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.managers.event_manager import EventTermCfg
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
-from mjlab_microduck.tasks.hostile_terrains import hostile_subterrains
+from mjlab_microduck.tasks.hostile_terrains import hostile_subterrains, hostile_subterrains_v2
 from mjlab_microduck.tasks.microduck_velocity_env_cfg import (
     MicroduckRlCfg,
     make_microduck_velocity_env_cfg,
@@ -59,21 +60,26 @@ TRACK_ANG_STD = math.sqrt(0.15)  # rad/s, was sqrt(0.5): a 0.3 rad/s unwanted tu
 MIN_PROGRESS = 0.3               # promotion needs ≥ 30 % of the commanded distance actually covered (anti-circling)
 # Terrain ladder.
 LADDER_ROWS = 8              # difficulty rows: row r has difficulty in [r/8, (r+1)/8)
+LADDER_ROWS_V2 = 10          # v2: gentler first rungs
+TERRAIN_SEED = 20260830      # v2: fixed so the CPU ground lookup (spawn anywhere) matches the GPU terrain
 PATCH_SIZE = 4.0             # m, one terrain patch (the base env used 8 m; 4 m = 4× fewer boxes)
 MIN_TRACKING_TO_PROMOTE = 0.55   # fraction of the max speed-tracking reward, averaged over the episode
 SPAWN_XY = 0.2               # m, random spawn offset from the patch centre (base env: 0.5)
 
 
-def make_hostile_terrains_cfg(rows: int = LADDER_ROWS, scale: float = 1.0) -> TerrainGeneratorCfg:
+def make_hostile_terrains_cfg(rows: int = LADDER_ROWS, scale: float = 1.0, v2: bool = False, seed: int | None = None) -> TerrainGeneratorCfg:
     """One column per terrain type, ``rows`` difficulty rows (curriculum=True is what makes rows
-    mean difficulty; with curriculum=False every patch gets a random difficulty)."""
+    mean difficulty; with curriculum=False every patch gets a random difficulty). v2: the 2026-08-30
+    menu; ``seed`` must be fixed for the spawn-anywhere reset (its ground lookup is built on CPU)."""
+    subs = hostile_subterrains_v2(scale) if v2 else hostile_subterrains(scale)
     return TerrainGeneratorCfg(
         size=(PATCH_SIZE, PATCH_SIZE),
         border_width=4.0,
         num_rows=rows,
-        num_cols=6,          # ignored in curriculum mode (one column per sub-terrain) but kept explicit
+        num_cols=len(subs),
         curriculum=True,
-        sub_terrains=hostile_subterrains(scale),
+        seed=seed,
+        sub_terrains=subs,
         add_lights=False,
     )
 
@@ -98,21 +104,37 @@ def make_microduck_velocity_hostile_env_cfg(
     progress: bool = False,
     terrain_scale: float = 1.0,
     max_init_level: int | None = None,
+    v2: bool = False,
 ):
+    """v2 (2026-08-30) = menu v2 + 10 rows + spawn anywhere on the patch + no-progress demotion + stricter
+    speed tracking, all switched on together (Rémi's review of the first night)."""
     cfg = make_microduck_velocity_env_cfg(play=play, rough=True)
+    if v2:
+        feet, track, progress = True, True, True
 
     # --- ground -----------------------------------------------------------------------------
-    cfg.scene.terrain.terrain_generator = make_hostile_terrains_cfg(rows=4 if play else LADDER_ROWS, scale=terrain_scale)
+    rows = 4 if play else (LADDER_ROWS_V2 if v2 else LADDER_ROWS)
+    cfg.scene.terrain.terrain_generator = make_hostile_terrains_cfg(rows=rows, scale=terrain_scale, v2=v2, seed=TERRAIN_SEED if v2 else None)
     if max_init_level is None:
         max_init_level = 2 if finetune else 0   # rows a robot can START on (0-based, inclusive)
     cfg.scene.terrain.max_init_terrain_level = max_init_level
     cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
         func=microduck_mdp.hostile_terrain_levels,
-        params={"min_tracking": MIN_TRACKING_TO_PROMOTE, "min_progress": MIN_PROGRESS if progress else 0.0},
+        params={"min_tracking": MIN_TRACKING_TO_PROMOTE, "min_progress": MIN_PROGRESS if progress else 0.0,
+                "demote_no_progress": bool(v2)},
     )
-    pose_range = cfg.events["reset_base"].params["pose_range"]
-    pose_range["x"] = (-SPAWN_XY, SPAWN_XY)
-    pose_range["y"] = (-SPAWN_XY, SPAWN_XY)
+    if v2:
+        # spawn anywhere on the patch (any step, any bump), random heading — see mdp.reset_root_on_terrain
+        cfg.events["reset_base"] = EventTermCfg(
+            func=microduck_mdp.reset_root_on_terrain,
+            mode="reset",
+            params={"span": PATCH_SIZE / 2 - 0.3, "res": 0.05, "flat_tol": 0.03,
+                    "yaw_range": (-math.pi, math.pi), "z_clearance": (0.125, 0.135), "candidates": 8},
+        )
+    else:
+        pose_range = cfg.events["reset_base"].params["pose_range"]
+        pose_range["x"] = (-SPAWN_XY, SPAWN_XY)
+        pose_range["y"] = (-SPAWN_XY, SPAWN_XY)
 
     # --- rewards ----------------------------------------------------------------------------
     if feet:

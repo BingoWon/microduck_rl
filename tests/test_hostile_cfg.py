@@ -120,3 +120,52 @@ def test_ladder_rule_progress_blocks_circling():
     env.command_manager = SimpleNamespace(get_command=lambda n: torch.tensor([[0.3, 0.0, 0.0], [0.3, 0.0, 0.0], [0.0, 0.0, 0.0]]))
     microduck_mdp.hostile_terrain_levels(env, torch.arange(3), min_tracking=0.55, min_progress=0.3)
     assert calls["up"].tolist() == [True, False, True]
+
+
+def test_v2_cfg_and_menu():
+    from mjlab_microduck.tasks.hostile_terrains import hostile_subterrains_v2
+    from mjlab_microduck.tasks.microduck_velocity_hostile_env_cfg import LADDER_ROWS_V2, TERRAIN_SEED
+    cfg = make_microduck_velocity_hostile_env_cfg(finetune=False, v2=True)
+    gen = cfg.scene.terrain.terrain_generator
+    assert set(gen.sub_terrains) == {"flat", "grid", "stairs", "rubble", "slopes"} and gen.num_rows == LADDER_ROWS_V2 and gen.seed == TERRAIN_SEED
+    assert cfg.events["reset_base"].func is microduck_mdp.reset_root_on_terrain
+    assert cfg.curriculum["terrain_levels"].params["demote_no_progress"] is True
+    assert cfg.rewards["track_linear_velocity"].params["std"] == pytest.approx(TRACK_LIN_STD)
+    r = hostile_subterrains_v2()["rubble"]
+    assert r.noise_range_easy[1] <= 0.002 and r.noise_range[1] >= 0.025
+
+
+def test_height_lookup_on_cpu():
+    """Build a small v2 terrain + robot on CPU, ray-cast the lookup, check stairs top / flat / step edges."""
+    from mjlab_microduck.tasks.microduck_velocity_hostile_env_cfg import make_hostile_terrains_cfg
+    from mjlab_microduck.robot.microduck_constants import MICRODUCK_WALK_XML
+    gcfg = make_hostile_terrains_cfg(rows=2, v2=True, seed=1)
+    spec = mujoco.MjSpec()
+    gen = TerrainGenerator(gcfg, device="cpu")
+    gen.compile(spec)
+    spec.attach(mujoco.MjSpec.from_file(str(MICRODUCK_WALK_XML)), prefix="", frame=spec.worldbody.add_frame())
+    model = spec.compile()
+    centers = gen.terrain_origins.reshape(-1, 3)[:, :2]
+    heights, allowed, offsets = microduck_mdp.build_terrain_height_lookup(model, centers, span=1.7, res=0.1, flat_tol=0.03)
+    names = list(gcfg.sub_terrains)
+    n = len(offsets); c = n // 2
+    for row in range(2):
+        for col, name in enumerate(names):
+            p = row * len(names) + col
+            oz = gen.terrain_origins[row, col, 2]
+            assert abs(heights[p, c, c] - oz) < 0.02, (name, heights[p, c, c], oz)   # centre = spawn origin height
+            if name == "flat":
+                assert np.allclose(heights[p], 0.0, atol=1e-3) and allowed[p].all()
+            if name == "stairs":
+                assert heights[p, c, c] > heights[p, 0, 0] + 0.05        # top platform above the outer step
+                assert 0.2 < allowed[p].mean() < 0.95                    # step edges excluded, treads usable
+    assert 0.3 < allowed.mean() <= 1.0
+
+
+def test_ladder_no_progress_demotes():
+    env, calls = _fake_env([False, False], [True, True], [0.9, 0.9])
+    robot = SimpleNamespace(data=SimpleNamespace(root_link_pos_w=torch.tensor([[3.0, 0.0, 0.1], [0.1, 0.0, 0.1]])))
+    env.scene = type("Scene", (), {"terrain": env.scene.terrain, "env_origins": torch.zeros(2, 3), "__getitem__": lambda self, k: robot})()
+    env.command_manager = SimpleNamespace(get_command=lambda n: torch.tensor([[0.3, 0.0, 0.0], [0.3, 0.0, 0.0]]))
+    microduck_mdp.hostile_terrain_levels(env, torch.arange(2), min_tracking=0.55, min_progress=0.3, demote_no_progress=True)
+    assert calls["up"].tolist() == [True, False] and calls["down"].tolist() == [False, True]

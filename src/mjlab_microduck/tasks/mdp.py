@@ -8022,6 +8022,7 @@ def hostile_terrain_levels(
     min_progress: float = 0.0,
     command_name: str = "twist",
     still_threshold: float = 0.05,
+    demote_no_progress: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Move each resetting robot up or down the terrain ladder from how its episode went.
 
@@ -8064,6 +8065,9 @@ def hostile_terrain_levels(
         progressed = (moved >= needed) | (v_cmd < still_threshold)
         move_up = move_up & progressed
     move_down = fell & (~move_up)
+    if min_progress > 0.0 and demote_no_progress:
+        # v2 (2026-08-30): surviving by marching on the spot under a "walk" command is a failure too
+        move_down = move_down | (timed_out & (~fell) & (~progressed))
     terrain.update_env_origins(env_ids, move_up, move_down)
     levels = terrain.terrain_levels.float()
     return {
@@ -8072,3 +8076,107 @@ def hostile_terrain_levels(
         "promoted": move_up.float().mean(),
         "demoted": move_down.float().mean(),
     }
+
+
+
+# =============================================================================
+# Hostile terrain v2 (2026-08-30): spawn anywhere on the terrain
+# =============================================================================
+
+
+def build_terrain_height_lookup(mj_model, centers_xy, span: float, res: float, flat_tol: float = 0.03):
+    """Ray-cast the ground height on a square grid around each patch centre (CPU MuJoCo, once at startup).
+
+    Returns (heights [P, n, n] float32, allowed [P, n, n] bool, offsets [n] float32): ``heights`` is the
+    LOCAL MAXIMUM of the surface in a 3×3 cell neighbourhood (so a robot placed there hangs ≤ one cell of
+    bump above ground instead of starting inside it), ``allowed`` marks cells whose neighbourhood height
+    range is ≤ ``flat_tol`` (no foot straddling a step edge at spawn). Robot geoms are moved 50 m up first
+    so rays only hit the ground.
+    """
+    import mujoco as _mj
+
+    data = _mj.MjData(mj_model)
+    _mj.mj_resetData(mj_model, data)
+    for j in range(mj_model.njnt):
+        if mj_model.jnt_type[j] == _mj.mjtJoint.mjJNT_FREE:
+            data.qpos[mj_model.jnt_qposadr[j] + 2] += 50.0
+    _mj.mj_forward(mj_model, data)
+    offsets = np.arange(-span, span + 1e-9, res, dtype=np.float32)
+    n = len(offsets)
+    geomid = np.zeros(1, np.int32)
+    raw = np.zeros((len(centers_xy), n, n), np.float32)
+    down = np.array([0.0, 0.0, -1.0])
+    for p, (cx, cy) in enumerate(centers_xy):
+        for i, dx in enumerate(offsets):
+            for j, dy in enumerate(offsets):
+                dist = _mj.mj_ray(mj_model, data, np.array([cx + dx, cy + dy, 10.0]), down, None, 1, -1, geomid)
+                raw[p, i, j] = 10.0 - dist if dist >= 0 else np.nan
+    raw = np.where(np.isnan(raw), np.nanmin(raw), raw)
+    pad = np.pad(raw, ((0, 0), (1, 1), (1, 1)), mode="edge")
+    stack = np.stack([pad[:, 1 + di:n + 1 + di, 1 + dj:n + 1 + dj] for di in (-1, 0, 1) for dj in (-1, 0, 1)])
+    heights = stack.max(axis=0)
+    allowed = (stack.max(axis=0) - stack.min(axis=0)) <= flat_tol
+    return heights.astype(np.float32), allowed, offsets
+
+
+class reset_root_on_terrain:
+    """Reset event: put the robot at a RANDOM place on its terrain patch (any step of the stairs, any spot of
+    the rubble…), facing a random direction, standing on the local ground height.
+
+    Why (Rémi, 2026-08-30): the policy is blind (no camera, no height map), so with a fixed spawn it can
+    learn *where* obstacles are ("after 0.4 m the ground drops") instead of how to handle them. Random
+    spawn removes that regularity, and on a pyramid it gives stairs going UP as well as down.
+
+    The ground height comes from a lookup built once at startup by ray-casting the CPU model of the scene
+    (`build_terrain_height_lookup`), which needs a FIXED terrain seed so every worker/process builds the same
+    terrain. Cells whose neighbourhood is not flat within ``flat_tol`` (step edges) are not used; if none of
+    ``candidates`` random cells is usable the patch origin is used.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        terrain = env.scene.terrain
+        assert terrain is not None and terrain.terrain_origins is not None, "reset_root_on_terrain needs a generated terrain"
+        gen = terrain.cfg.terrain_generator
+        assert gen is not None and gen.seed is not None, "set terrain_generator.seed so the CPU lookup matches the GPU terrain"
+        span = float(cfg.params.get("span", gen.size[0] / 2 - 0.3))
+        res = float(cfg.params.get("res", 0.05))
+        flat_tol = float(cfg.params.get("flat_tol", 0.03))
+        origins = terrain.terrain_origins  # [rows, cols, 3]
+        rows, cols = origins.shape[0], origins.shape[1]
+        centers = origins.reshape(-1, 3)[:, :2].cpu().numpy()
+        heights, allowed, offsets = build_terrain_height_lookup(env.sim.mj_model, centers, span, res, flat_tol)
+        self.rows, self.cols = rows, cols
+        self.heights = torch.as_tensor(heights, device=env.device)
+        self.allowed = torch.as_tensor(allowed, device=env.device)
+        self.offsets = torch.as_tensor(offsets, device=env.device)
+        self.n = len(offsets)
+        print(f"[reset_root_on_terrain] lookup {rows}×{cols} patches × {self.n}² cells, "
+              f"{100 * allowed.mean():.0f} % usable cells (flat within {flat_tol * 100:.0f} mm)")
+
+    def __call__(self, env: ManagerBasedRlEnv, env_ids: torch.Tensor, span: float = 1.7, res: float = 0.05,
+                 flat_tol: float = 0.03, yaw_range: tuple[float, float] = (-math.pi, math.pi),
+                 z_clearance: tuple[float, float] = (0.125, 0.135), candidates: int = 8,
+                 asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> None:
+        del span, res, flat_tol  # consumed at init
+        asset = env.scene[asset_cfg.name]
+        terrain = env.scene.terrain
+        N = len(env_ids)
+        dev = env.device
+        patch = terrain.terrain_levels[env_ids] * self.cols + terrain.terrain_types[env_ids]
+        cand = torch.randint(0, self.n, (N, candidates, 2), device=dev)
+        ok = self.allowed[patch.unsqueeze(1), cand[..., 0], cand[..., 1]]  # [N, candidates]
+        has = ok.any(dim=1)
+        first = torch.argmax(ok.int(), dim=1)
+        ij = cand[torch.arange(N, device=dev), first]  # [N, 2]
+        centre = (self.n - 1) // 2
+        ij = torch.where(has.unsqueeze(1), ij, torch.full_like(ij, centre))
+        dx, dy = self.offsets[ij[:, 0]], self.offsets[ij[:, 1]]
+        h = self.heights[patch, ij[:, 0], ij[:, 1]]
+        origins = env.scene.env_origins[env_ids]
+        z = h + torch.empty(N, device=dev).uniform_(*z_clearance)
+        pos = torch.stack([origins[:, 0] + dx, origins[:, 1] + dy, z], dim=1)
+        yaw = torch.empty(N, device=dev).uniform_(*yaw_range)
+        quat = torch.stack([torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)], dim=1)
+        asset.write_root_link_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+        asset.write_root_link_velocity_to_sim(torch.zeros(N, 6, device=dev), env_ids=env_ids)
+        env.extras["log"]["Metrics/spawn_on_terrain_fallback"] = (~has).float().mean()

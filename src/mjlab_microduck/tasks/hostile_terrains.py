@@ -85,3 +85,33 @@ def hostile_subterrains(scale: float = 1.0) -> dict[str, terrain_gen.SubTerrainC
             proportion=0.15, slope_range=(0.05 * s, 0.16 * s), platform_width=0.8,
             horizontal_scale=0.1, vertical_scale=0.001),
     }
+
+
+def hostile_subterrains_v2(scale: float = 1.0) -> dict[str, terrain_gen.SubTerrainCfg]:
+    """Menu v2 (2026-08-30, after Rémi's review of the first night):
+
+    * no stones (too sparse: a lucky heading never touched one);
+    * rubble is the main "natural" ground and starts NEARLY FLAT (±2 mm) so the first ladder rungs
+      are gentle, ramping to ±2.5 cm;
+    * flat areas shrink: flat patches are 5 % of robots, and the flat platforms on top of the stairs
+      and slopes go from 0.8 m to 0.36–0.4 m (three treads) — a robot that "succeeds" must meet the
+      obstacles. With the spawn-anywhere reset (mdp.reset_root_on_terrain) robots also start on the
+      steps themselves, facing any direction: stairs are climbed AND descended.
+    """
+    s = scale
+    return {
+        "flat": terrain_gen.BoxFlatTerrainCfg(proportion=0.05),
+        "grid": terrain_gen.BoxRandomGridTerrainCfg(
+            proportion=0.15, grid_width=0.45, grid_height_range=(0.0, 0.015 * s),
+            platform_width=0.4, border_width=0.25),
+        "stairs": terrain_gen.BoxPyramidStairsTerrainCfg(
+            proportion=0.30, step_height_range=(0.01 * s, 0.03 * s), step_width=0.12,
+            platform_width=0.36, border_width=0.2),
+        "rubble": HfRubbleTerrainCfg(
+            proportion=0.30, noise_range=(-0.025 * s, 0.025 * s), noise_range_easy=(-0.002 * s, 0.002 * s),
+            noise_step=0.001, downsampled_scale=0.08, horizontal_scale=0.04, vertical_scale=0.001,
+            border_width=0.2),
+        "slopes": terrain_gen.HfPyramidSlopedTerrainCfg(
+            proportion=0.20, slope_range=(0.05 * s, 0.16 * s), platform_width=0.4,
+            horizontal_scale=0.1, vertical_scale=0.001),
+    }

@@ -146,7 +146,7 @@ def test_height_lookup_on_cpu():
     spec.attach(mujoco.MjSpec.from_file(str(MICRODUCK_WALK_XML)), prefix="", frame=spec.worldbody.add_frame())
     model = spec.compile()
     centers = gen.terrain_origins.reshape(-1, 3)[:, :2]
-    heights, allowed, offsets = microduck_mdp.build_terrain_height_lookup(model, centers, span=1.7, res=0.1, flat_tol=0.03)
+    heights, allowed, offsets = microduck_mdp.build_terrain_height_lookup(model, centers, span=1.7, res=0.1, flat_tol=0.02)
     names = list(gcfg.sub_terrains)
     n = len(offsets); c = n // 2
     for row in range(2):

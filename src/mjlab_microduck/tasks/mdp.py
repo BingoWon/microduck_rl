@@ -8151,7 +8151,7 @@ class reset_root_on_terrain:
         self.offsets = torch.as_tensor(offsets, device=env.device)
         self.n = len(offsets)
         print(f"[reset_root_on_terrain] lookup {rows}×{cols} patches × {self.n}² cells, "
-              f"{100 * allowed.mean():.0f} % usable cells (flat within {flat_tol * 100:.0f} mm)")
+              f"{100 * allowed.mean():.0f} % usable cells (neighbourhood height range ≤ {flat_tol * 100:.0f} cm)")
 
     def __call__(self, env: ManagerBasedRlEnv, env_ids: torch.Tensor, span: float = 1.7, res: float = 0.05,
                  flat_tol: float = 0.03, yaw_range: tuple[float, float] = (-math.pi, math.pi),
@@ -8179,4 +8179,4 @@ class reset_root_on_terrain:
         quat = torch.stack([torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)], dim=1)
         asset.write_root_link_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
         asset.write_root_link_velocity_to_sim(torch.zeros(N, 6, device=dev), env_ids=env_ids)
-        env.extras["log"]["Metrics/spawn_on_terrain_fallback"] = (~has).float().mean()
+        # (no env.extras["log"] write here: reset events run before the env recreates that dict)

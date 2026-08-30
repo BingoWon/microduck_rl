@@ -128,7 +128,7 @@ def make_microduck_velocity_hostile_env_cfg(
         cfg.events["reset_base"] = EventTermCfg(
             func=microduck_mdp.reset_root_on_terrain,
             mode="reset",
-            params={"span": PATCH_SIZE / 2 - 0.3, "res": 0.05, "flat_tol": 0.03,
+            params={"span": PATCH_SIZE / 2 - 0.3, "res": 0.05, "flat_tol": 0.02,
                     "yaw_range": (-math.pi, math.pi), "z_clearance": (0.125, 0.135), "candidates": 8},
         )
     else:

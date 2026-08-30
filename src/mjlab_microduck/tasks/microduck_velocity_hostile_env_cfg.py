@@ -63,7 +63,9 @@ LADDER_ROWS = 8              # difficulty rows: row r has difficulty in [r/8, (r
 LADDER_ROWS_V2 = 10          # v2: gentler first rungs
 TERRAIN_SEED = 20260830      # v2: fixed so the CPU ground lookup (spawn anywhere) matches the GPU terrain
 PATCH_SIZE = 4.0             # m, one terrain patch (the base env used 8 m; 4 m = 4× fewer boxes)
-MIN_TRACKING_TO_PROMOTE = 0.55   # fraction of the max speed-tracking reward, averaged over the episode
+MIN_TRACKING_TO_PROMOTE = 0.55   # fraction of the max speed-tracking reward, averaged over the episode (std² = 0.1)
+MIN_TRACKING_STRICT = 0.30       # same bar under the narrow curve (std² = 0.05): exp(-e²/0.05) = exp(-e²/0.1)² → 0.55² ≈ 0.30.
+                                 # Run H (2026-08-30) kept 0.55 with the narrow curve and almost nobody climbed for 1000 it.
 SPAWN_XY = 0.2               # m, random spawn offset from the patch centre (base env: 0.5)
 
 
@@ -120,8 +122,8 @@ def make_microduck_velocity_hostile_env_cfg(
     cfg.scene.terrain.max_init_terrain_level = max_init_level
     cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
         func=microduck_mdp.hostile_terrain_levels,
-        params={"min_tracking": MIN_TRACKING_TO_PROMOTE, "min_progress": MIN_PROGRESS if progress else 0.0,
-                "demote_no_progress": bool(v2)},
+        params={"min_tracking": MIN_TRACKING_STRICT if track else MIN_TRACKING_TO_PROMOTE,
+                "min_progress": MIN_PROGRESS if progress else 0.0, "demote_no_progress": bool(v2)},
     )
     if v2:
         # spawn anywhere on the patch (any step, any bump), random heading — see mdp.reset_root_on_terrain

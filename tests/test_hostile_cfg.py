@@ -130,6 +130,7 @@ def test_v2_cfg_and_menu():
     assert set(gen.sub_terrains) == {"flat", "grid", "stairs", "rubble", "slopes"} and gen.num_rows == LADDER_ROWS_V2 and gen.seed == TERRAIN_SEED
     assert cfg.events["reset_base"].func is microduck_mdp.reset_root_on_terrain
     assert cfg.curriculum["terrain_levels"].params["demote_no_progress"] is True
+    assert cfg.curriculum["terrain_levels"].params["min_tracking"] < 0.55   # rescaled for the narrow tracking curve
     assert cfg.rewards["track_linear_velocity"].params["std"] == pytest.approx(TRACK_LIN_STD)
     r = hostile_subterrains_v2()["rubble"]
     assert r.noise_range_easy[1] <= 0.002 and r.noise_range[1] >= 0.025

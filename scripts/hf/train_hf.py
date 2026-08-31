@@ -1,7 +1,7 @@
 """Back-compat shim: the submission logic moved to mjlab_microduck.hf_jobs.
 
-Prefer the integrated flag:
-    uv run train <task> <train args...> --hf-jobs [--namespace <ns>] [...]
+Prefer the console script:
+    uv run train-hf <task> <train args...> [--namespace <ns>] [...]
 
 This script keeps the old invocation working:
     uv run scripts/hf/train_hf.py <task> [submission flags] <train args...>

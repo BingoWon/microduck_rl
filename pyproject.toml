@@ -41,9 +41,14 @@ dependencies = [
 mjlab_microduck = "mjlab_microduck.tasks"
 
 [project.scripts]
-# Shadows mjlab's `train` entry point: identical behavior, plus a --hf-jobs
-# flag that submits the run to Hugging Face Jobs instead (see train_cli.py).
-train = "mjlab_microduck.train_cli:main"
+# Deliberately NOT named `train`: mjlab 1.3.0 ships a `train` console script
+# too, and two distributions declaring the SAME script name is last-writer-wins
+# at install time — there is no shadowing. `uv sync` wrote mjlab's shim into
+# .venv/bin/train, so `uv run train ... --hf-jobs` reached mjlab's tyro parser
+# and died on "Unrecognized options: --hf-jobs" (2026-08-31). `train` is
+# mjlab's; remote submission keeps its own collision-free name.
+# Locked by tests/test_entry_point_names.py.
+train-hf = "mjlab_microduck.hf_jobs:main"
   
 [tool.ruff]
 src = ["src"]  # Helpful for recognizing first-party imports.

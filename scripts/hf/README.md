@@ -13,11 +13,11 @@ wandb login      # auto-detected from ~/.netrc and forwarded
 
 ## Submit a run
 
-Your normal train command, plus `--hf-jobs`:
+Your normal train command, with `train-hf` in place of `train`:
 
 ```fish
-uv run train Mjlab-Kick-Flat-MicroDuck \
-    --env.scene.num-envs 4096 --agent.max_iterations 4000 --hf-jobs
+uv run train-hf Mjlab-Kick-Flat-MicroDuck \
+    --env.scene.num-envs 4096 --agent.max_iterations 4000
 ```
 
 You'll be asked which namespace to run under — your personal account or one
@@ -25,9 +25,9 @@ of your orgs. Repos, uv-cache bucket, billing and the job itself all live in
 the chosen namespace. Pass `--namespace <name>` to skip the prompt
 (non-interactive runs default to personal).
 
-Without `--hf-jobs` the command behaves exactly as before (local training).
-Submission flags are consumed locally; everything else is forwarded to
-`uv run train` inside the job.
+`uv run train` still runs locally, exactly as before (it is mjlab's own
+entry point). Submission flags are consumed locally; everything else is
+forwarded to `uv run train` inside the job.
 
 Useful flags:
 - `--namespace <name>` — account/org to run under; skips the prompt
@@ -36,7 +36,7 @@ Useful flags:
 - `--detach` — submit and return immediately (default streams logs; Ctrl-C detaches without killing the job)
 - `--dry-run` — build tarball, print the job spec, do not submit
 - `--run-name <tag>` — overrides the auto-generated `<task>-<timestamp>` name
-- `--no-uv-cache` — disable the persistent `uv` cache bucket (first-run cost on every run)
+- `--uv-cache` — mount the persistent `uv` cache bucket (off by default; see the flag's help for why)
 - `--no-wandb` — don't forward a wandb key
 
 (`uv run scripts/hf/train_hf.py <task> ...` still works — it's a shim to the

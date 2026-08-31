@@ -1,12 +1,14 @@
 """Submit a mjlab-microduck training run as a Hugging Face Job.
 
-Invoked via the `train` wrapper (see train_cli.py):
+Same command line as a local run, under the `train-hf` entry point:
 
-    uv run train Mjlab-Kick-Flat-MicroDuck \
-        --env.scene.num-envs 4096 --agent.max_iterations 4000 --hf-jobs
+    uv run train    Mjlab-Kick-Flat-MicroDuck \
+        --env.scene.num-envs 4096 --agent.max_iterations 4000   # local (mjlab)
+    uv run train-hf Mjlab-Kick-Flat-MicroDuck \
+        --env.scene.num-envs 4096 --agent.max_iterations 4000   # on HF Jobs
 
-Anything that isn't an --hf-* / submission flag is forwarded verbatim to
-`uv run train` inside the job.
+Anything that isn't a submission flag is forwarded verbatim to `uv run train`
+inside the job.
 
 Auth: the cached HF token from `hf auth login` / HF_TOKEN env. The account's
 orgs are listed at submission and you pick the namespace to run under
@@ -241,7 +243,7 @@ def _await_scheduling(
 def submit(argv: list[str]) -> int:
     """Parse submission args from ``argv`` and launch the HF job."""
     ap = argparse.ArgumentParser(
-        prog="train --hf-jobs",
+        prog="train-hf",
         description="Submit a microduck training run to HF Jobs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -478,3 +480,14 @@ def submit(argv: list[str]) -> int:
     except KeyboardInterrupt:
         print(f"\n[job] detached. Job {job.id} is still running: {getattr(job, 'url', job.id)}")
         return 0
+
+
+def main() -> int:
+    """`train-hf` console script."""
+    # A stray `--hf-jobs` (the flag this entry point replaces) would otherwise
+    # be forwarded into the job's own `uv run train`, where it is unknown.
+    return submit([a for a in sys.argv[1:] if a != "--hf-jobs"])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

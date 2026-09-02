@@ -28,7 +28,9 @@ dependencies = [
 
 [dependency-groups]
 # Without this, a fresh `uv sync` prunes pytest and none of the test suite runs.
-dev = ["pytest"]
+# optuna: bam puts it behind its `identification` extra, which is not installed,
+# so bam.fit (and any actuator refit) cannot even import without this.
+dev = ["pytest", "optuna", "cmaes"]
 
 [project.entry-points."mjlab.tasks"]
 mjlab_microduck = "mjlab_microduck.tasks"

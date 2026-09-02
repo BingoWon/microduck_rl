@@ -30,6 +30,8 @@ rebalance that followed that null. See the budget comment beside the weights.
 
 import dataclasses
 
+from pathlib import Path
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import RewardTermCfg
 
@@ -135,7 +137,13 @@ HOP_HEIGHT_STD = 0.020
 # Locked arm at zero airborne reward and make the controlled comparison
 # meaningless, which is precisely why the earlier absolute-height threshold
 # could not simply be raised past the 14.2 mm posture headroom.
-MIN_RISE = 0.003
+# 1 mm, not the 3 mm this started at. The rigid (Locked) arm's PHYSICAL ceiling
+# is ~3.4 mm of CoM rise at converged timestep, so a 3 mm gate sat AT that
+# ceiling and scored the control arm at exactly zero however well it learned --
+# the previous three-arm sweep was never a fair comparison. The earlier
+# justification ("still admits the Locked arm's expected ~5 mm hop") conflated
+# drop-rig REBOUND with an achievable hop from standing.
+MIN_RISE = 0.001
 
 # Upward base velocity at which `hop_upward_velocity` saturates (it clamps
 # vel_z/max_vel to [0, 1]). A ballistic launch at v rises v**2/(2*g), so the old
@@ -492,6 +500,69 @@ HOP_ARMS = (
 )
 
 HOP_ARM_SUFFIX = {"locked": "Locked", "k2500": "K2500", "k3900": "K3900"}
+
+
+
+# --- corrections measured on the real bench, 2026-09-02 ---------------------
+#
+# The first three-arm sweep was run with all four of these wrong. Applied to the
+# HOP PATH ONLY -- the shared actuator cfg object is deep-copied -- so the
+# velocity/run/backlash tasks keep their previous behaviour and remain
+# comparable with their own history.
+HOP_TIMESTEP = 0.002       # was 0.005
+HOP_DECIMATION = 10        # was 4; 0.002 x 10 keeps the 50 Hz control period,
+                           # which a gain sweep found to be the optimum
+HOP_KP_FW = 400.0          # was 200. Measured on the bench: achieved amplitude
+                           # peaks at kp 400-800 and FALLS at 1600 while current
+                           # rises 71%, so the benefit is exhausted by ~400 and
+                           # the predicted 3.1x at kp 2000 is not real.
+_MEASURED_PARAMS = "xl330_m6_measured_friction.json"
+
+
+def apply_hop_corrections(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
+    """Apply the bench-measured corrections to a composed hop cfg.
+
+    Call AFTER make_sprung_variant, since that swaps the robot entity.
+
+    Timestep: dt=0.005 manufactures energy. Measured drop-rig energy retention
+    was 0.872 at dt=0.005 against a 0.468 LOSSLESS ceiling -- the integrator was
+    creating energy via the 37.6 Hz boot mode at ~5 steps/period. Two thirds to
+    three quarters of the sprung advantage was numerical.
+
+    Delay: delay_*_lag are counted in SIM STEPS, so halving the timestep would
+    silently halve the physical latency. Rescaled to hold 15-30 ms.
+
+    Friction: the gearbox supports 75% of external load (see the params file).
+    """
+    import dataclasses
+    from copy import deepcopy
+
+    cfg.sim.mujoco.timestep = HOP_TIMESTEP
+    cfg.decimation = HOP_DECIMATION
+
+    scale = 0.005 / HOP_TIMESTEP
+    params = str(Path(__file__).resolve().parents[1] / "robot" / _MEASURED_PARAMS)
+
+    robot = cfg.scene.entities["robot"]
+    new_acts = []
+    for act in robot.articulation.actuators:
+        a = deepcopy(act)
+        for field, value in (("kp_fw", HOP_KP_FW),
+                             ("json_path", params),
+                             ("motor_name", None),
+                             ("model", None)):
+            if hasattr(a, field):
+                object.__setattr__(a, field, value) if dataclasses.is_dataclass(a) and \
+                    getattr(type(a), "__dataclass_params__", None) and \
+                    type(a).__dataclass_params__.frozen else setattr(a, field, value)
+        for field in ("delay_min_lag", "delay_max_lag"):
+            if hasattr(a, field) and getattr(a, field) is not None:
+                setattr(a, field, int(round(getattr(a, field) * scale)))
+        new_acts.append(a)
+    robot.articulation = dataclasses.replace(
+        robot.articulation, actuators=tuple(new_acts)
+    )
+    return cfg
 
 
 def hop_rl_cfg(label: str):

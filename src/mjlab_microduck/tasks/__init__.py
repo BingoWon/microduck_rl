@@ -87,7 +87,13 @@ from .microduck_spin_env_cfg import (
 from .backlash import make_backlash_variant
 from .run import make_run_variant, MicroduckRunRlCfg
 from .sprung import SWEEP_ARMS, make_sprung_variant, sprung_rl_cfg, ARM_TASK_SUFFIX
-from .hop import HOP_ARMS, HOP_ARM_SUFFIX, hop_rl_cfg, make_hop_variant
+from .hop import (
+    HOP_ARMS,
+    HOP_ARM_SUFFIX,
+    apply_hop_corrections,
+    hop_rl_cfg,
+    make_hop_variant,
+)
 from mjlab_microduck.robot.sprung_foot import H_ADD
 
 # Standard velocity task
@@ -176,14 +182,14 @@ for _label, _k, _travel, _pad in HOP_ARMS:
     _tid = f"Mjlab-Hop-Flat-Sprung-{HOP_ARM_SUFFIX[_label]}-MicroDuck"
     register_mjlab_task(
         task_id=_tid,
-        env_cfg=make_sprung_variant(
+        env_cfg=apply_hop_corrections(make_sprung_variant(
             make_hop_variant(make_microduck_velocity_env_cfg(), stiffness=_k),
             stiffness=_k, travel=_travel, pad_mass=_pad, h_add=H_ADD,
-        ),
-        play_env_cfg=make_sprung_variant(
+        )),
+        play_env_cfg=apply_hop_corrections(make_sprung_variant(
             make_hop_variant(make_microduck_velocity_env_cfg(play=True), stiffness=_k),
             stiffness=_k, travel=_travel, pad_mass=_pad, h_add=H_ADD,
-        ),
+        )),
         rl_cfg=hop_rl_cfg(_label),
         runner_cls=MicroduckOnPolicyRunner,
     )

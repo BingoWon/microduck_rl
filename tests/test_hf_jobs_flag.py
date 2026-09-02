@@ -76,8 +76,11 @@ def test_train_on_path_is_a_mjlab_trainer():
         "no `train` on PATH — the venv script was uninstalled and not recreated; "
         "run `uv sync --reinstall-package mjlab-microduck`."
     )
-    head = Path(exe).read_bytes()[:8192]
-    assert b"mjlab" in head, (
+    # Whole file, not a head slice: on Windows the console script is a ~40 KB
+    # .exe launcher with the Python shim APPENDED at the end, so the import
+    # line only shows up in the last few hundred bytes.
+    content = Path(exe).read_bytes()
+    assert b"mjlab" in content, (
         f"`train` resolves to {exe}, which is not a mjlab trainer. bin/train was "
         "uninstalled and this is an unrelated binary from PATH."
     )

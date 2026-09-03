@@ -51,9 +51,13 @@ Never launch a long run without one.
   benchmarks. Preserve actor, critic, optimizer, iteration, curriculum counter,
   and normalizers. A winning gate continues directly; do not retrain it from
   the same starting actor.
-- Always keep the next candidate ready before the current gate ends. An
-  invalid candidate may keep running only until its replacement is ready; do
-  not keep a known-useless policy merely to make GPU utilization non-zero.
+- **A known-invalid Trainer is a P0 cost incident and must be replaced
+  immediately.** Never keep it running while implementing, testing, deploying,
+  or waiting for its successor. If the corrected candidate is not already
+  runnable, immediately resume the last known-valid checkpoint and training
+  contract, then prepare the correction while that valid rollback runs. The
+  only acceptable states are a useful Trainer or the sub-15-second atomic
+  switch window; GPU utilization by a known-useless policy does not count.
 - Use deterministic fixed-side evaluation for promotion. Training-time
   stochastic completion is diagnostic only. Every evaluator that fixes a
   command side must also fix `reset_single_leg_jump.fixed_side`; otherwise
@@ -188,6 +192,14 @@ The full incident record and reusable Vast procedure are in
   instead of sagittal, head-tripod instead of standing). Encode what counts as
   the maneuver in hard state-based gates (support contact, orientation-axis
   checks, latches), not in small penalty nudges.
+- **A command clock may open a maneuver phase; it can never prove failure.**
+  Missing a preparatory predicate or not leaving the ground at the nominal
+  compression/extension boundary means no progress reward, not termination.
+  Never cut off an action that still has physical momentum and could succeed
+  on a later simulation step. Hard failure requires an observed unsafe or
+  irreversible post-takeoff/landing state, NaN, terrain exit, or the ordinary
+  episode time limit. Diagnostic viewers must remove behavior and fall-height
+  terminations so the complete attempted motion remains visible.
 - **No jackpots:** any "reach X" reward must be rate-limited or slewed.
   Arriving early at a goal state that then pays per-step is a jackpot that
   buys arbitrary violence. For commanded transitions, track a slewed internal

@@ -126,8 +126,7 @@ def make_microduck_single_leg_jump_env_cfg(
             "state_bank_path": str(RESET_STATE_BANK),
             "standing_prob": 0.60 if not play else 1.0,
             "compressed_prob": 0.25 if not play else 0.0,
-            "airborne_prob": 0.075 if not play else 0.0,
-            "landing_prob": 0.075 if not play else 0.0,
+            "airborne_prob": 0.15 if not play else 0.0,
         },
     )
     cfg.terminations["jump_success"] = TerminationTermCfg(
@@ -169,8 +168,7 @@ def make_microduck_single_leg_jump_env_cfg(
                         "params": {
                             "standing_prob": 0.60,
                             "compressed_prob": 0.25,
-                            "airborne_prob": 0.075,
-                            "landing_prob": 0.075,
+                            "airborne_prob": 0.15,
                         },
                     },
                     {
@@ -178,8 +176,7 @@ def make_microduck_single_leg_jump_env_cfg(
                         "params": {
                             "standing_prob": 0.75,
                             "compressed_prob": 0.15,
-                            "airborne_prob": 0.05,
-                            "landing_prob": 0.05,
+                            "airborne_prob": 0.10,
                         },
                     },
                     {
@@ -187,8 +184,7 @@ def make_microduck_single_leg_jump_env_cfg(
                         "params": {
                             "standing_prob": 0.90,
                             "compressed_prob": 0.06,
-                            "airborne_prob": 0.02,
-                            "landing_prob": 0.02,
+                            "airborne_prob": 0.04,
                         },
                     },
                     {
@@ -197,7 +193,6 @@ def make_microduck_single_leg_jump_env_cfg(
                             "standing_prob": 1.0,
                             "compressed_prob": 0.0,
                             "airborne_prob": 0.0,
-                            "landing_prob": 0.0,
                         },
                     },
                 ],

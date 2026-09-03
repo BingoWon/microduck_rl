@@ -234,21 +234,18 @@ def test_reverse_curriculum_uses_harvested_states_and_anneals_to_standing():
             "standing_prob",
             "compressed_prob",
             "airborne_prob",
-            "landing_prob",
         )
     ) == pytest.approx(1.0)
     stages = cfg.curriculum["jump_reset_mix"].params["param_stages"]
     assert stages[0]["params"] == {
         "standing_prob": 0.60,
         "compressed_prob": 0.25,
-        "airborne_prob": 0.075,
-        "landing_prob": 0.075,
+        "airborne_prob": 0.15,
     }
     assert stages[-1]["params"] == {
         "standing_prob": 1.0,
         "compressed_prob": 0.0,
         "airborne_prob": 0.0,
-        "landing_prob": 0.0,
     }
     play = make_microduck_single_leg_jump_env_cfg(play=True)
     assert "jump_reset_mix" not in play.curriculum
@@ -257,9 +254,20 @@ def test_reverse_curriculum_uses_harvested_states_and_anneals_to_standing():
 
 def test_harvested_state_bank_is_balanced_and_well_formed():
     payload = json.loads(RESET_STATE_BANK.read_text())
-    assert payload["version"] == 1
+    assert payload["version"] == 2
+    spec = make_microduck_single_leg_jump_env_cfg(
+        play=True
+    ).scene.entities["robot"].spec_fn()
+    joint_ranges = [
+        tuple(joint.range)
+        for joint in spec.joints
+        if joint.name != "trunk_base_freejoint"
+        and not joint.name.startswith("passive_")
+    ]
+    assert len(joint_ranges) == 14
     for side in ("left", "right"):
-        for category in ("compressed", "airborne", "landing"):
+        serialized = set()
+        for category in ("standing", "compressed", "airborne"):
             states = payload["states"][side][category]
             assert states
             for state in states:
@@ -283,6 +291,40 @@ def test_harvested_state_bank_is_balanced_and_well_formed():
                         ]
                     )
                 ).all()
+                assert torch.linalg.vector_norm(
+                    torch.tensor(state["root_quat"])
+                ).item() == pytest.approx(1.0, abs=1e-5)
+                for position, (lower, upper) in zip(
+                    state["joint_pos"], joint_ranges, strict=True
+                ):
+                    assert lower - 1e-5 <= position <= upper + 1e-5
+                for position, velocity, (lower, upper) in zip(
+                    state["joint_pos"],
+                    state["joint_vel"],
+                    joint_ranges,
+                    strict=True,
+                ):
+                    if position <= lower + 1e-5:
+                        assert velocity >= 0.0
+                    if position >= upper - 1e-5:
+                        assert velocity <= 0.0
+                assert not state["swing_contact"]
+                assert not state["nonfoot_contact"]
+                if category == "standing":
+                    assert state["support_contact"]
+                elif category == "compressed":
+                    assert state["support_contact"]
+                    assert state["root_lin_vel"][2] <= 0.0
+                    assert (
+                        state["baseline_z"] - state["root_pos"][2]
+                        >= 0.003
+                    )
+                elif category == "airborne":
+                    assert not state["support_contact"]
+                    assert state["root_lin_vel"][2] >= 0.02
+                key = json.dumps(state, sort_keys=True)
+                assert key not in serialized
+                serialized.add(key)
 
 
 def test_discovery_shaping_is_bounded_and_anneals_to_zero():
@@ -377,6 +419,43 @@ def test_partial_reset_clears_jump_latches():
     assert env._slj_took_off.tolist() == [True, False, True]
     assert env._slj_landed.tolist() == [True, False, True]
     assert env._slj_peak_height_gain.tolist() == pytest.approx([0.01, 0.0, 0.01])
+
+
+def test_banked_reset_aligns_command_side_mode_and_phase(monkeypatch):
+    def fake_stand_resample(term, env_ids):
+        term.vel_command_b[env_ids] = 0.0
+        term.vel_command_b[env_ids, 1] = 1.0
+        term._alpha[env_ids] = 0.0
+
+    monkeypatch.setattr(
+        microduck_mdp.SingleLegStandCommand,
+        "_resample_command",
+        fake_stand_resample,
+    )
+    term = object.__new__(microduck_mdp.SingleLegJumpCommand)
+    term.cfg = SimpleNamespace(
+        fixed_mode=0,
+        prepare_s=1.5,
+        crouch_s=0.22,
+        extend_s=0.12,
+    )
+    term._jump_prob = 0.75
+    term._env = SimpleNamespace(
+        device="cpu",
+        _slj_reset_kind=torch.tensor([0, 1, 2]),
+        _slj_reset_side=torch.tensor([-1.0, 1.0, -1.0]),
+    )
+    term.vel_command_b = torch.zeros(3, 3)
+    term._alpha = torch.zeros(3)
+    term._is_jump = torch.ones(3, dtype=torch.bool)
+    term._elapsed = torch.full((3,), 99.0)
+
+    term._resample_command(torch.arange(3))
+
+    assert term.vel_command_b[:, 1].tolist() == [-1.0, 1.0, -1.0]
+    assert term._alpha.tolist() == [1.0, 1.0, 1.0]
+    assert term._is_jump.tolist() == [False, True, True]
+    assert term._elapsed.tolist() == pytest.approx([0.0, 1.72, 1.84])
 
 
 def test_training_metrics_are_split_by_support_side():

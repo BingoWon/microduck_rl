@@ -18,12 +18,33 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
 
 TASK = "Mjlab-SingleLegJump-Flat-MicroDuck"
-CATEGORIES = ("compressed", "airborne", "landing")
+CATEGORIES = ("standing", "compressed", "airborne")
 
 
-def _snapshot(raw) -> dict[str, torch.Tensor]:
+def _snapshot(raw, side: int) -> dict[str, torch.Tensor]:
     asset = raw.scene["robot"]
     servo_ids, _ = asset.find_joints(r"^(?!passive_).*")
+    joint_pos = asset.data.joint_pos[:, servo_ids].clone()
+    joint_vel = asset.data.joint_vel[:, servo_ids].clone()
+    limits = asset.data.joint_pos_limits[:, servo_ids]
+    lower, upper = limits[..., 0], limits[..., 1]
+    outward = ((joint_pos <= lower) & (joint_vel < 0.0)) | (
+        (joint_pos >= upper) & (joint_vel > 0.0)
+    )
+    joint_pos = torch.clamp(joint_pos, min=lower, max=upper)
+    joint_vel[outward] = 0.0
+    support = 0 if side == -1 else 1
+    swing = 1 - support
+    foot_contact = (
+        raw.scene.sensors["feet_ground_contact"]
+        .data.found.reshape(raw.num_envs, -1)[:, :2]
+        .bool()
+    )
+    nonfoot_contact = (
+        raw.scene.sensors["nonfoot_ground_contact"]
+        .data.found.reshape(raw.num_envs, -1)
+        .any(dim=1)
+    )
     return {
         "root_pos": (
             asset.data.root_link_pos_w - raw.scene.terrain.env_origins
@@ -31,10 +52,13 @@ def _snapshot(raw) -> dict[str, torch.Tensor]:
         "root_quat": asset.data.root_link_quat_w.clone(),
         "root_lin_vel": asset.data.root_link_lin_vel_w.clone(),
         "root_ang_vel": asset.data.root_link_ang_vel_w.clone(),
-        "joint_pos": asset.data.joint_pos[:, servo_ids].clone(),
-        "joint_vel": asset.data.joint_vel[:, servo_ids].clone(),
+        "joint_pos": joint_pos,
+        "joint_vel": joint_vel,
         "baseline_z": raw._slj_baseline_z.clone(),
         "peak_height_gain": raw._slj_peak_height_gain.clone(),
+        "support_contact": foot_contact[:, support].clone(),
+        "swing_contact": foot_contact[:, swing].clone(),
+        "nonfoot_contact": nonfoot_contact.clone(),
     }
 
 
@@ -103,6 +127,12 @@ def harvest_side(
     env_cfg.commands["twist"].fixed_side = side
     env_cfg.commands["twist"].fixed_mode = 1
     env_cfg.commands["twist"].resampling_time_range = (6.0, 6.0)
+    env_cfg.events["reset_single_leg_jump"].params.update(
+        state_bank_path=None,
+        standing_prob=1.0,
+        compressed_prob=0.0,
+        airborne_prob=0.0,
+    )
     env_cfg.terminations.pop("jump_success", None)
     env_cfg.terminations.pop("jump_failure", None)
     agent_cfg = load_rl_cfg(TASK)
@@ -121,22 +151,57 @@ def harvest_side(
     policy = runner.get_inference_policy(device=device)
     obs = env.get_observations()
     raw = env.unwrapped
-    snapshot = _snapshot(raw)
+    snapshot = _snapshot(raw, side)
     records = _new_records(snapshot)
     alive = torch.ones(num_envs, dtype=torch.bool, device=device)
 
     with torch.inference_mode():
         for _ in range(round(6.0 / raw.step_dt) - 1):
-            before = _snapshot(raw)
+            before = _snapshot(raw, side)
             phase_before = obs["actor"][:, 50].clone()
             obs, _, dones, _ = env.step(policy(obs))
-            after = _snapshot(raw)
+            after = _snapshot(raw, side)
             phase_after = obs["actor"][:, 50]
 
+            before_support_only = (
+                before["support_contact"]
+                & ~before["swing_contact"]
+                & ~before["nonfoot_contact"]
+            )
+            after_support_only = (
+                after["support_contact"]
+                & ~after["swing_contact"]
+                & ~after["nonfoot_contact"]
+            )
+            after_airborne = (
+                ~after["support_contact"]
+                & ~after["swing_contact"]
+                & ~after["nonfoot_contact"]
+            )
+            standing = (
+                (phase_before == 0.0)
+                & (phase_after < 0.0)
+                & before_support_only
+                & alive
+            )
             compressed = (phase_before < 0.0) & (phase_after > 0.0) & alive
+            compressed &= (
+                after_support_only
+                & (after["root_lin_vel"][:, 2] <= 0.0)
+                & (
+                    after["baseline_z"] - after["root_pos"][:, 2]
+                    >= 0.003
+                )
+            )
+            airborne = (
+                raw._slj_takeoff_event
+                & after_airborne
+                & (after["root_lin_vel"][:, 2] >= 0.02)
+                & alive
+            )
+            _store(records, "standing", before, standing)
             _store(records, "compressed", after, compressed)
-            _store(records, "airborne", after, raw._slj_takeoff_event & alive)
-            _store(records, "landing", before, raw._slj_landing_event & alive)
+            _store(records, "airborne", after, airborne)
 
             alive &= ~dones.bool()
     complete = alive & raw._slj_completed
@@ -185,7 +250,7 @@ def main() -> None:
             ),
         }
     payload = {
-        "version": 1,
+        "version": 2,
         "task": TASK,
         "source_checkpoint_sha256": hashlib.sha256(
             args.checkpoint.read_bytes()

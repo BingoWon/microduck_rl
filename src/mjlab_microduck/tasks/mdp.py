@@ -5946,12 +5946,15 @@ class SingleLegJumpCommand(SingleLegStandCommand):
         reset_side = getattr(self._env, "_slj_reset_side", None)
         if reset_kind is not None and reset_side is not None:
             kind = reset_kind[env_ids]
+            banked = reset_side[env_ids] != 0.0
+            banked_ids = env_ids[banked]
+            if len(banked_ids) > 0:
+                self.vel_command_b[banked_ids, 1] = reset_side[banked_ids]
+                self._alpha[banked_ids] = 1.0
             special = kind > 0
             special_ids = env_ids[special]
             if len(special_ids) > 0:
                 self._is_jump[special_ids] = True
-                self.vel_command_b[special_ids, 1] = reset_side[special_ids]
-                self._alpha[special_ids] = 1.0
                 compressed = kind[special] == 1
                 elapsed = torch.full(
                     (len(special_ids),),
@@ -6411,7 +6414,6 @@ def reset_single_leg_jump_state(
     standing_prob: float = 1.0,
     compressed_prob: float = 0.0,
     airborne_prob: float = 0.0,
-    landing_prob: float = 0.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
     """Reset latches and optionally apply harvested reverse-curriculum states."""
@@ -6489,14 +6491,13 @@ def reset_single_leg_jump_state(
         standing_prob,
         compressed_prob,
         airborne_prob,
-        landing_prob,
     )
     if any(p < 0.0 for p in probabilities):
         raise ValueError("single-leg jump reset probabilities must be non-negative")
     total = sum(probabilities)
     if abs(total - 1.0) > 1e-6:
         raise ValueError("single-leg jump reset probabilities must sum to 1")
-    if state_bank_path is None or total == standing_prob:
+    if state_bank_path is None:
         return
 
     cache_key = str(Path(state_bank_path).resolve())
@@ -6521,30 +6522,23 @@ def reset_single_leg_jump_state(
 
     u = torch.rand(len(env_ids), device=env.device)
     compressed_cut = standing_prob + compressed_prob
-    airborne_cut = compressed_cut + airborne_prob
     kinds = torch.zeros(len(env_ids), dtype=torch.long, device=env.device)
     kinds[(u >= standing_prob) & (u < compressed_cut)] = 1
-    kinds[(u >= compressed_cut) & (u < airborne_cut)] = 2
-    kinds[u >= airborne_cut] = 3
-    special = kinds > 0
-    if not bool(special.any()):
-        return
-    special_ids = env_ids[special]
-    special_kinds = kinds[special]
+    kinds[u >= compressed_cut] = 2
     sides = torch.where(
-        torch.rand(len(special_ids), device=env.device) < 0.5,
-        -torch.ones(len(special_ids), device=env.device),
-        torch.ones(len(special_ids), device=env.device),
+        torch.rand(len(env_ids), device=env.device) < 0.5,
+        -torch.ones(len(env_ids), device=env.device),
+        torch.ones(len(env_ids), device=env.device),
     )
-    env._slj_reset_kind[special_ids] = special_kinds
-    env._slj_reset_side[special_ids] = sides
+    env._slj_reset_kind[env_ids] = kinds
+    env._slj_reset_side[env_ids] = sides
 
     asset: Entity = env.scene[asset_cfg.name]
     servo_ids = _servo_joint_ids(env, asset)
     for side_value, side_name in ((-1.0, "left"), (1.0, "right")):
-        for kind, category in ((1, "compressed"), (2, "airborne"), (3, "landing")):
-            selected = (sides == side_value) & (special_kinds == kind)
-            ids = special_ids[selected]
+        for kind, category in ((0, "standing"), (1, "compressed"), (2, "airborne")):
+            selected = (sides == side_value) & (kinds == kind)
+            ids = env_ids[selected]
             if len(ids) == 0:
                 continue
             states = env._slj_state_bank[side_name][category]
@@ -6589,6 +6583,8 @@ def reset_single_leg_jump_state(
             env._slj_paid_compression[ids] = compression
             env._slj_max_upward_velocity[ids] = upward
             env._slj_paid_upward_velocity[ids] = upward
+            if kind == 0:
+                continue
             if kind == 1:
                 env._slj_previous_support[ids] = True
                 env._slj_previous_command_phase[ids] = -1.0

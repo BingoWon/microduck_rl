@@ -204,3 +204,20 @@ def test_frontier_progress_pays_only_new_maximum():
         frontier, paid, target=0.01
     )
     assert torch.allclose(reward, torch.tensor([0.0, 0.5, 0.0, 0.0]))
+
+
+def test_training_metrics_are_split_by_support_side():
+    cfg = make_microduck_single_leg_jump_env_cfg()
+    for side in ("left", "right"):
+        for metric in (
+            "command_count",
+            "takeoff_rate",
+            "landing_rate",
+            "completion_rate",
+            "failure_rate",
+            "peak_height_gain",
+        ):
+            term = cfg.metrics[f"jump_{metric}_{side}"]
+            assert term.func is microduck_mdp.single_leg_jump_metric
+            assert term.reduce == "last"
+            assert term.params["support_side"] == (-1 if side == "left" else 1)

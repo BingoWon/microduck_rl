@@ -8,6 +8,7 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import (
     CurriculumTermCfg,
     EventTermCfg,
+    MetricsTermCfg,
     RewardTermCfg,
     TerminationTermCfg,
 )
@@ -133,6 +134,24 @@ def make_microduck_single_leg_jump_env_cfg(
         time_out=False,
         params=jump_params,
     )
+    for side_name, support_side in (("left", -1), ("right", 1)):
+        for metric in (
+            "command_count",
+            "takeoff_rate",
+            "landing_rate",
+            "completion_rate",
+            "failure_rate",
+            "peak_height_gain",
+        ):
+            cfg.metrics[f"jump_{metric}_{side_name}"] = MetricsTermCfg(
+                func=microduck_mdp.single_leg_jump_metric,
+                reduce="last",
+                params={
+                    **jump_params,
+                    "metric": metric,
+                    "support_side": support_side,
+                },
+            )
     if not play:
         cfg.curriculum["jump_reset_mix"] = CurriculumTermCfg(
             func=microduck_mdp.event_param_curriculum,

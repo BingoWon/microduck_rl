@@ -6447,6 +6447,12 @@ def reset_single_leg_jump_state(
         env._slj_landing_event = torch.zeros(
             n, dtype=torch.bool, device=env.device
         )
+        env._slj_took_off = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
+        env._slj_landed = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
         env._slj_previous_command_phase = torch.zeros(n, device=env.device)
         env._slj_reset_kind = torch.zeros(n, dtype=torch.long, device=env.device)
         env._slj_reset_side = torch.zeros(n, device=env.device)
@@ -6468,6 +6474,8 @@ def reset_single_leg_jump_state(
     env._slj_failed[env_ids] = False
     env._slj_takeoff_event[env_ids] = False
     env._slj_landing_event[env_ids] = False
+    env._slj_took_off[env_ids] = False
+    env._slj_landed[env_ids] = False
     env._slj_previous_command_phase[env_ids] = 0.0
     env._slj_reset_kind[env_ids] = 0
     env._slj_reset_side[env_ids] = 0.0
@@ -6584,6 +6592,7 @@ def reset_single_leg_jump_state(
                 env._slj_stage[ids] = _SLJ_FLIGHT
                 env._slj_previous_support[ids] = False
                 env._slj_previous_command_phase[ids] = 1.0
+                env._slj_took_off[ids] = True
 
 
 def _update_single_leg_jump(
@@ -6687,6 +6696,8 @@ def _update_single_leg_jump(
     bad_contact &= active
     env._slj_takeoff_event = takeoff
     env._slj_landing_event = landing
+    env._slj_took_off |= takeoff
+    env._slj_landed |= landing
     env._slj_stage[takeoff] = _SLJ_FLIGHT
     env._slj_stage[landing] = _SLJ_RECOVERY
     env._slj_recovery_s[landing] = 0.0
@@ -6734,9 +6745,7 @@ def _update_single_leg_jump(
     env._slj_max_recovery_s = torch.maximum(
         env._slj_max_recovery_s, env._slj_recovery_s
     )
-    env._slj_failed |= recovering & (
-        ~support_contact | swing_contact | ~nonfoot_clear
-    )
+    env._slj_failed |= recovering & (swing_contact | ~nonfoot_clear)
     completed = recovering & (env._slj_recovery_s >= recovery_s)
     env._slj_completed |= completed
     env._slj_stage[env._slj_completed] = _SLJ_COMPLETE
@@ -6994,6 +7003,54 @@ def single_leg_jump_recovery_progress(
         env._slj_paid_recovery, env._slj_max_recovery_s
     )
     return reward
+
+
+def single_leg_jump_metric(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    metric: str,
+    support_side: int,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    """Batch metric for one commanded support side, broadcast for logging."""
+    if support_side not in (-1, 1):
+        raise ValueError("support_side must be -1 or 1")
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    side, _, _, _ = _single_leg_command_state(env, command_name)
+    selected = (
+        env.command_manager.get_term(command_name).is_jump
+        & (side == float(support_side))
+    )
+    count = selected.sum().clamp_min(1)
+    if metric == "command_count":
+        value = selected.sum().float()
+    elif metric == "takeoff_rate":
+        value = (env._slj_took_off & selected).sum().float() / count
+    elif metric == "landing_rate":
+        value = (env._slj_landed & selected).sum().float() / count
+    elif metric == "completion_rate":
+        value = (env._slj_completed & selected).sum().float() / count
+    elif metric == "failure_rate":
+        value = (env._slj_failed & selected).sum().float() / count
+    elif metric == "peak_height_gain":
+        value = (env._slj_peak_height_gain * selected).sum() / count
+    else:
+        raise ValueError(f"unknown single-leg jump metric: {metric}")
+    return value.expand(env.num_envs)
 
 
 def ball_pos_in_base(

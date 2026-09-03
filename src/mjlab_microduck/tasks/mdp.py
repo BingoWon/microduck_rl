@@ -1,7 +1,9 @@
 """MDP functions for microduck tasks"""
 
+import json
 import math
 from dataclasses import dataclass as _dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -5906,6 +5908,234 @@ class SingleLegStandCommandCfg(UniformVelocityCommandCfg):
         return SingleLegStandCommand(self, env)
 
 
+class SingleLegJumpCommand(SingleLegStandCommand):
+    """Command stand replay or one scheduled single-leg jump.
+
+    Command layout:
+      [0, side,  0]  stand replay
+      [1, side,  0]  jump preparation / recovery
+      [1, side, -1]  compression
+      [1, side, +1]  extension
+
+    The user chooses only the mode and side. The command term owns the phase.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._jump_prob = float(cfg.jump_prob)
+        self._is_jump = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._elapsed = torch.zeros(self.num_envs, device=self.device)
+        self._skill_gui = None
+
+    @property
+    def is_jump(self) -> torch.Tensor:
+        return self._is_jump
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        super()._resample_command(env_ids)
+        if self.cfg.fixed_mode in (0, 1):
+            self._is_jump[env_ids] = bool(self.cfg.fixed_mode)
+        else:
+            self._is_jump[env_ids] = (
+                torch.rand(len(env_ids), device=self.device) < self._jump_prob
+            )
+        self._elapsed[env_ids] = 0.0
+        reset_kind = getattr(self._env, "_slj_reset_kind", None)
+        reset_side = getattr(self._env, "_slj_reset_side", None)
+        if reset_kind is not None and reset_side is not None:
+            kind = reset_kind[env_ids]
+            banked = reset_side[env_ids] != 0.0
+            banked_ids = env_ids[banked]
+            if len(banked_ids) > 0:
+                self.vel_command_b[banked_ids, 1] = reset_side[banked_ids]
+                self._alpha[banked_ids] = 1.0
+            special = kind > 0
+            special_ids = env_ids[special]
+            if len(special_ids) > 0:
+                self._is_jump[special_ids] = True
+                compressed = kind[special] == 1
+                elapsed = torch.full(
+                    (len(special_ids),),
+                    self.cfg.prepare_s + self.cfg.crouch_s + self.cfg.extend_s,
+                    device=self.device,
+                )
+                elapsed[compressed] = self.cfg.prepare_s + self.cfg.crouch_s
+                self._elapsed[special_ids] = elapsed
+
+    def compute(self, dt: float) -> None:
+        super().compute(dt)
+        if self._skill_gui is not None:
+            selection = self._skill_gui.value
+            side = -1.0 if selection.startswith("Left") else 1.0
+            jump = selection.endswith("jump")
+            changed = (self.vel_command_b[:, 1] != side) | (
+                self._is_jump != jump
+            )
+            side_changed = self.vel_command_b[:, 1] != side
+            self.vel_command_b[:, 1] = side
+            self._is_jump[:] = jump
+            self._alpha[side_changed] = 0.0
+            self._elapsed[changed] = 0.0
+
+        self._elapsed += dt
+        crouch_end = self.cfg.prepare_s + self.cfg.crouch_s
+        extend_end = crouch_end + self.cfg.extend_s
+        phase = torch.where(
+            (self._elapsed >= self.cfg.prepare_s) & (self._elapsed < crouch_end),
+            -torch.ones_like(self._elapsed),
+            torch.where(
+                (self._elapsed >= crouch_end) & (self._elapsed < extend_end),
+                torch.ones_like(self._elapsed),
+                torch.zeros_like(self._elapsed),
+            ),
+        )
+        self.vel_command_b[:, 0] = self._is_jump.float()
+        self.vel_command_b[:, 2] = torch.where(
+            self._is_jump, phase, torch.zeros_like(phase)
+        )
+
+    def create_gui(self, name, server, *args, **kwargs) -> None:
+        del args, kwargs
+        side = "Right" if self.cfg.fixed_side == 1 else "Left"
+        mode = "jump" if self.cfg.fixed_mode == 1 else "stand"
+        with server.gui.add_folder(name.capitalize()):
+            self._skill_gui = server.gui.add_dropdown(
+                "Command",
+                ("Left stand", "Right stand", "Left jump", "Right jump"),
+                initial_value=f"{side} {mode}",
+            )
+
+
+@_dataclass(kw_only=True)
+class SingleLegJumpCommandCfg(SingleLegStandCommandCfg):
+    jump_prob: float = 0.75
+    fixed_mode: int = -1
+    prepare_s: float = 1.5
+    crouch_s: float = 0.22
+    extend_s: float = 0.12
+
+    def build(self, env: ManagerBasedRlEnv) -> "SingleLegJumpCommand":
+        return SingleLegJumpCommand(self, env)
+
+
+class SingleLegJumpTransitionCommand(SingleLegJumpCommand):
+    """Schedule one stand/jump transaction and return to the starting side."""
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._transaction_jump_prob = float(cfg.transaction_jump_prob)
+        self._cross_side_prob = float(cfg.cross_side_prob)
+        self._resume_side = torch.zeros(self.num_envs, device=self.device)
+        self._target_side = torch.zeros(self.num_envs, device=self.device)
+        self._transaction_is_jump = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._returning = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+
+    @property
+    def resume_side(self) -> torch.Tensor:
+        return self._resume_side
+
+    @property
+    def target_side(self) -> torch.Tensor:
+        return self._target_side
+
+    @property
+    def transaction_is_jump(self) -> torch.Tensor:
+        return self._transaction_is_jump
+
+    @property
+    def returning(self) -> torch.Tensor:
+        return self._returning
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        super()._resample_command(env_ids)
+        resume = self.vel_command_b[env_ids, 1].clone()
+        if self.cfg.fixed_resume_side in (-1, 1):
+            resume.fill_(float(self.cfg.fixed_resume_side))
+            self.vel_command_b[env_ids, 1] = resume
+        if self.cfg.fixed_target_side in (-1, 1):
+            target = torch.full_like(resume, float(self.cfg.fixed_target_side))
+        else:
+            cross = (
+                torch.rand(len(env_ids), device=self.device)
+                < self._cross_side_prob
+            )
+            target = torch.where(cross, -resume, resume)
+        if self.cfg.fixed_transaction_mode in (0, 1):
+            is_jump = torch.full(
+                (len(env_ids),),
+                bool(self.cfg.fixed_transaction_mode),
+                dtype=torch.bool,
+                device=self.device,
+            )
+        else:
+            is_jump = (
+                torch.rand(len(env_ids), device=self.device)
+                < self._transaction_jump_prob
+            )
+        self._resume_side[env_ids] = resume
+        self._target_side[env_ids] = target
+        self._transaction_is_jump[env_ids] = is_jump
+        self._is_jump[env_ids] = False
+        self._returning[env_ids] = False
+        self._elapsed[env_ids] = 0.0
+
+    def compute(self, dt: float) -> None:
+        SingleLegStandCommand.compute(self, dt)
+        self._elapsed += dt
+        local = self._elapsed - self.cfg.initial_hold_s
+        return_start = (
+            self.cfg.prepare_s
+            + self.cfg.crouch_s
+            + self.cfg.extend_s
+            + self.cfg.recovery_s
+        )
+        target_active = (local >= 0.0) & (local < return_start)
+        target_side = torch.where(
+            target_active, self._target_side, self._resume_side
+        )
+        side_changed = self.vel_command_b[:, 1] != target_side
+        self.vel_command_b[:, 1] = target_side
+        self._alpha[side_changed] = 0.0
+        self._returning = local >= return_start
+        self._is_jump = self._transaction_is_jump & target_active
+
+        crouch_end = self.cfg.prepare_s + self.cfg.crouch_s
+        extend_end = crouch_end + self.cfg.extend_s
+        phase = torch.where(
+            (local >= self.cfg.prepare_s) & (local < crouch_end),
+            -torch.ones_like(local),
+            torch.where(
+                (local >= crouch_end) & (local < extend_end),
+                torch.ones_like(local),
+                torch.zeros_like(local),
+            ),
+        )
+        self.vel_command_b[:, 0] = self._is_jump.float()
+        self.vel_command_b[:, 2] = torch.where(
+            self._is_jump, phase, torch.zeros_like(phase)
+        )
+
+
+@_dataclass(kw_only=True)
+class SingleLegJumpTransitionCommandCfg(SingleLegJumpCommandCfg):
+    transaction_jump_prob: float = 0.75
+    cross_side_prob: float = 0.5
+    initial_hold_s: float = 1.5
+    recovery_s: float = 1.5
+    fixed_resume_side: int = 0
+    fixed_target_side: int = 0
+    fixed_transaction_mode: int = -1
+
+    def build(self, env: ManagerBasedRlEnv) -> "SingleLegJumpTransitionCommand":
+        return SingleLegJumpTransitionCommand(self, env)
+
+
 def _single_leg_command_state(
     env: ManagerBasedRlEnv,
     command_name: str,
@@ -6116,6 +6346,7 @@ def single_leg_hold_progress_reward(
     max_lin_vel: float = 0.08,
     max_ang_vel: float = 0.8,
     require_com_inside: bool = True,
+    required_mode: str | None = None,
 ) -> torch.Tensor:
     """Reward only uninterrupted progress toward a valid single-leg hold."""
     valid = single_leg_success_state(
@@ -6130,6 +6361,18 @@ def single_leg_hold_progress_reward(
         max_ang_vel=max_ang_vel,
         require_com_inside=require_com_inside,
     ).bool()
+    if required_mode is not None:
+        is_jump = getattr(
+            env.command_manager.get_term(command_name),
+            "is_jump",
+            torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+        )
+        if required_mode == "stand":
+            valid &= ~is_jump
+        elif required_mode == "jump":
+            valid &= is_jump
+        else:
+            raise ValueError("required_mode must be 'stand', 'jump', or None")
     if not hasattr(env, "_single_leg_reward_hold_s"):
         env._single_leg_reward_hold_s = torch.zeros(env.num_envs, device=env.device)
     env._single_leg_reward_hold_s[env.episode_length_buf <= 1] = 0.0
@@ -6153,6 +6396,7 @@ def single_leg_hold_success(
     max_lin_vel: float = 0.08,
     max_ang_vel: float = 0.8,
     require_com_inside: bool = True,
+    required_mode: str | None = None,
 ) -> torch.Tensor:
     """Success only after the valid stance has held continuously for ``hold_s``."""
     step = int(env.common_step_counter)
@@ -6169,6 +6413,18 @@ def single_leg_hold_success(
             max_ang_vel=max_ang_vel,
             require_com_inside=require_com_inside,
         ).bool()
+        if required_mode is not None:
+            is_jump = getattr(
+                env.command_manager.get_term(command_name),
+                "is_jump",
+                torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+            )
+            if required_mode == "stand":
+                valid &= ~is_jump
+            elif required_mode == "jump":
+                valid &= is_jump
+            else:
+                raise ValueError("required_mode must be 'stand', 'jump', or None")
         if not hasattr(env, "_single_leg_hold_s"):
             env._single_leg_hold_s = torch.zeros(env.num_envs, device=env.device)
         env._single_leg_hold_s[env.episode_length_buf <= 1] = 0.0
@@ -6195,6 +6451,7 @@ def single_leg_success_rate_for_side(
     max_lin_vel: float = 0.08,
     max_ang_vel: float = 0.8,
     require_com_inside: bool = True,
+    required_mode: str | None = None,
 ) -> torch.Tensor:
     """Per-step success rate for one commanded side, broadcast for metric logging."""
     if support_side not in (-1, 1):
@@ -6213,9 +6470,863 @@ def single_leg_success_rate_for_side(
         max_lin_vel=max_lin_vel,
         max_ang_vel=max_ang_vel,
         require_com_inside=require_com_inside,
+        required_mode=required_mode,
     )
     rate = torch.sum(success * selected) / torch.clamp(torch.sum(selected), min=1)
     return rate.expand(env.num_envs)
+
+
+_SLJ_PREPARE = 0
+_SLJ_FLIGHT = 1
+_SLJ_RECOVERY = 2
+_SLJ_COMPLETE = 3
+_SLJ_FAILED = 4
+
+
+def single_leg_jump_transition_flags(
+    stage: torch.Tensor,
+    initial_grounded: torch.Tensor,
+    previous_support_contact: torch.Tensor,
+    support_contact: torch.Tensor,
+    swing_contact: torch.Tensor,
+    nonfoot_clear: torch.Tensor,
+    upward_velocity: torch.Tensor,
+    peak_height_gain: torch.Tensor,
+    min_takeoff_velocity: float,
+    min_height_gain: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pure takeoff, landing, and contact-failure predicates."""
+    takeoff = (
+        (stage == _SLJ_PREPARE)
+        & initial_grounded
+        & previous_support_contact
+        & ~support_contact
+        & ~swing_contact
+        & nonfoot_clear
+        & (upward_velocity >= min_takeoff_velocity)
+    )
+    landing = (
+        (stage == _SLJ_FLIGHT)
+        & support_contact
+        & ~swing_contact
+        & nonfoot_clear
+        & (peak_height_gain >= min_height_gain)
+    )
+    bad_contact = (
+        ((stage == _SLJ_FLIGHT) | (stage == _SLJ_RECOVERY))
+        & (swing_contact | ~nonfoot_clear)
+    )
+    return takeoff, landing, bad_contact
+
+
+def reset_single_leg_jump_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    state_bank_path: str | None = None,
+    standing_prob: float = 1.0,
+    compressed_prob: float = 0.0,
+    airborne_prob: float = 0.0,
+    fixed_side: int = 0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Reset latches and optionally apply harvested reverse-curriculum states."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    if len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    n = env.num_envs
+    if not hasattr(env, "_slj_stage"):
+        env._slj_stage = torch.full(
+            (n,), _SLJ_PREPARE, dtype=torch.long, device=env.device
+        )
+        env._slj_initial_grounded = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
+        env._slj_previous_support = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
+        env._slj_attempt_started = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
+        env._slj_baseline_z = torch.zeros(n, device=env.device)
+        env._slj_peak_height_gain = torch.zeros(n, device=env.device)
+        env._slj_recovery_s = torch.zeros(n, device=env.device)
+        env._slj_max_recovery_s = torch.zeros(n, device=env.device)
+        env._slj_max_compression = torch.zeros(n, device=env.device)
+        env._slj_max_upward_velocity = torch.zeros(n, device=env.device)
+        env._slj_paid_recovery = torch.zeros(n, device=env.device)
+        env._slj_paid_compression = torch.zeros(n, device=env.device)
+        env._slj_paid_upward_velocity = torch.zeros(n, device=env.device)
+        env._slj_completed = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._slj_failed = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._slj_takeoff_event = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
+        env._slj_landing_event = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
+        env._slj_took_off = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
+        env._slj_landed = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
+        env._slj_completion_event = torch.zeros(
+            n, dtype=torch.bool, device=env.device
+        )
+        env._slj_previous_command_phase = torch.zeros(n, device=env.device)
+        env._slj_reset_kind = torch.zeros(n, dtype=torch.long, device=env.device)
+        env._slj_reset_side = torch.zeros(n, device=env.device)
+        env._slj_last_update = -1
+    env._slj_stage[env_ids] = _SLJ_PREPARE
+    env._slj_initial_grounded[env_ids] = False
+    env._slj_previous_support[env_ids] = False
+    env._slj_attempt_started[env_ids] = False
+    env._slj_baseline_z[env_ids] = 0.0
+    env._slj_peak_height_gain[env_ids] = 0.0
+    env._slj_recovery_s[env_ids] = 0.0
+    env._slj_max_recovery_s[env_ids] = 0.0
+    env._slj_max_compression[env_ids] = 0.0
+    env._slj_max_upward_velocity[env_ids] = 0.0
+    env._slj_paid_recovery[env_ids] = 0.0
+    env._slj_paid_compression[env_ids] = 0.0
+    env._slj_paid_upward_velocity[env_ids] = 0.0
+    env._slj_completed[env_ids] = False
+    env._slj_failed[env_ids] = False
+    env._slj_takeoff_event[env_ids] = False
+    env._slj_landing_event[env_ids] = False
+    env._slj_took_off[env_ids] = False
+    env._slj_landed[env_ids] = False
+    env._slj_completion_event[env_ids] = False
+    env._slj_previous_command_phase[env_ids] = 0.0
+    env._slj_reset_kind[env_ids] = 0
+    env._slj_reset_side[env_ids] = 0.0
+    env._slj_last_update = -1
+
+    probabilities = (
+        standing_prob,
+        compressed_prob,
+        airborne_prob,
+    )
+    if any(p < 0.0 for p in probabilities):
+        raise ValueError("single-leg jump reset probabilities must be non-negative")
+    total = sum(probabilities)
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError("single-leg jump reset probabilities must sum to 1")
+    if fixed_side not in (-1, 0, 1):
+        raise ValueError("single-leg jump reset fixed_side must be -1, 0, or 1")
+    if state_bank_path is None:
+        return
+
+    cache_key = str(Path(state_bank_path).resolve())
+    if getattr(env, "_slj_state_bank_path", None) != cache_key:
+        payload = json.loads(Path(state_bank_path).read_text(encoding="utf-8"))
+        bank = {}
+        for side_name, categories in payload["states"].items():
+            bank[side_name] = {}
+            for category, states in categories.items():
+                if not states:
+                    raise ValueError(f"empty jump reset state category: {side_name}/{category}")
+                bank[side_name][category] = {
+                    name: torch.tensor(
+                        [state[name] for state in states],
+                        dtype=torch.float32,
+                        device=env.device,
+                    )
+                    for name in states[0]
+                }
+        env._slj_state_bank_path = cache_key
+        env._slj_state_bank = bank
+
+    u = torch.rand(len(env_ids), device=env.device)
+    compressed_cut = standing_prob + compressed_prob
+    kinds = torch.zeros(len(env_ids), dtype=torch.long, device=env.device)
+    kinds[(u >= standing_prob) & (u < compressed_cut)] = 1
+    kinds[u >= compressed_cut] = 2
+    if fixed_side in (-1, 1):
+        sides = torch.full(
+            (len(env_ids),), float(fixed_side), device=env.device
+        )
+    else:
+        sides = torch.where(
+            torch.rand(len(env_ids), device=env.device) < 0.5,
+            -torch.ones(len(env_ids), device=env.device),
+            torch.ones(len(env_ids), device=env.device),
+        )
+    env._slj_reset_kind[env_ids] = kinds
+    env._slj_reset_side[env_ids] = sides
+
+    asset: Entity = env.scene[asset_cfg.name]
+    servo_ids = _servo_joint_ids(env, asset)
+    for side_value, side_name in ((-1.0, "left"), (1.0, "right")):
+        for kind, category in ((0, "standing"), (1, "compressed"), (2, "airborne")):
+            selected = (sides == side_value) & (kinds == kind)
+            ids = env_ids[selected]
+            if len(ids) == 0:
+                continue
+            states = env._slj_state_bank[side_name][category]
+            choices = torch.randint(
+                len(states["root_pos"]), (len(ids),), device=env.device
+            )
+            root_pose = torch.cat(
+                (
+                    states["root_pos"][choices]
+                    + env.scene.terrain.env_origins[ids],
+                    states["root_quat"][choices],
+                ),
+                dim=1,
+            )
+            root_velocity = torch.cat(
+                (
+                    states["root_lin_vel"][choices],
+                    states["root_ang_vel"][choices],
+                ),
+                dim=1,
+            )
+            asset.write_root_link_pose_to_sim(root_pose, env_ids=ids)
+            asset.write_root_link_velocity_to_sim(root_velocity, env_ids=ids)
+            joint_pos = asset.data.joint_pos[ids].clone()
+            joint_vel = asset.data.joint_vel[ids].clone()
+            joint_pos[:, servo_ids] = states["joint_pos"][choices]
+            joint_vel[:, servo_ids] = states["joint_vel"][choices]
+            asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=ids)
+
+            env._slj_initial_grounded[ids] = True
+            env._slj_attempt_started[ids] = True
+            env._slj_baseline_z[ids] = states["baseline_z"][choices]
+            env._slj_peak_height_gain[ids] = states["peak_height_gain"][choices]
+            compression = torch.clamp(
+                states["baseline_z"][choices] - states["root_pos"][choices, 2],
+                min=0.0,
+            )
+            upward = torch.clamp(
+                states["root_lin_vel"][choices, 2], min=0.0
+            )
+            env._slj_max_compression[ids] = compression
+            env._slj_paid_compression[ids] = compression
+            env._slj_max_upward_velocity[ids] = upward
+            env._slj_paid_upward_velocity[ids] = upward
+            if kind == 0:
+                continue
+            if kind == 1:
+                env._slj_previous_support[ids] = True
+                env._slj_previous_command_phase[ids] = -1.0
+            else:
+                env._slj_stage[ids] = _SLJ_FLIGHT
+                env._slj_previous_support[ids] = False
+                env._slj_previous_command_phase[ids] = 1.0
+                env._slj_took_off[ids] = True
+
+
+def _update_single_leg_jump(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float,
+    min_height_gain: float,
+    recovery_s: float,
+) -> None:
+    step = int(env.common_step_counter)
+    if getattr(env, "_slj_last_update", None) == step:
+        return
+    if not hasattr(env, "_slj_stage"):
+        reset_single_leg_jump_state(
+            env, torch.arange(env.num_envs, device=env.device)
+        )
+
+    term = env.command_manager.get_term(command_name)
+    jump_mode = term.is_jump
+    command = env.command_manager.get_command(command_name)
+    command_phase = command[:, 2]
+    _, support, swing, alpha = _single_leg_command_state(env, command_name)
+    contacts = _single_leg_contacts(env, sensor_name).bool()
+    batch = torch.arange(env.num_envs, device=env.device)
+    support_contact = contacts[batch, support]
+    swing_contact = contacts[batch, swing]
+    nonfoot_clear = any_contact_cost(env, nonfoot_sensor_name) == 0.0
+    asset: Entity = env.scene[asset_cfg.name]
+    root = asset.data
+    z = root.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2]
+    vz = root.root_link_lin_vel_w[:, 2]
+
+    active = jump_mode & ~env._slj_completed & ~env._slj_failed
+    eligible = active & (alpha >= 0.99)
+    initial_valid = (
+        eligible & support_contact & ~swing_contact & nonfoot_clear
+    )
+    env._slj_initial_grounded |= initial_valid & ~env._slj_attempt_started
+
+    entering_compression = (
+        active
+        & (command_phase < 0.0)
+        & (env._slj_previous_command_phase >= 0.0)
+    )
+    env._slj_attempt_started |= entering_compression
+    env._slj_baseline_z = torch.where(
+        entering_compression, z, env._slj_baseline_z
+    )
+    env._slj_peak_height_gain = torch.where(
+        entering_compression,
+        torch.zeros_like(env._slj_peak_height_gain),
+        env._slj_peak_height_gain,
+    )
+    valid_pre_takeoff = (
+        active
+        & (env._slj_stage == _SLJ_PREPARE)
+        & env._slj_attempt_started
+        & support_contact
+        & ~swing_contact
+        & nonfoot_clear
+    )
+    compression = torch.clamp(env._slj_baseline_z - z, min=0.0)
+    env._slj_max_compression = torch.where(
+        valid_pre_takeoff,
+        torch.maximum(env._slj_max_compression, compression),
+        env._slj_max_compression,
+    )
+    extension = valid_pre_takeoff & (command_phase > 0.0)
+    env._slj_max_upward_velocity = torch.where(
+        extension,
+        torch.maximum(env._slj_max_upward_velocity, torch.clamp(vz, min=0.0)),
+        env._slj_max_upward_velocity,
+    )
+    tracking_peak = active & env._slj_attempt_started
+    height_gain = torch.clamp(z - env._slj_baseline_z, min=0.0)
+    env._slj_peak_height_gain = torch.where(
+        tracking_peak,
+        torch.maximum(env._slj_peak_height_gain, height_gain),
+        env._slj_peak_height_gain,
+    )
+
+    takeoff, landing, bad_contact = single_leg_jump_transition_flags(
+        env._slj_stage,
+        env._slj_initial_grounded,
+        env._slj_previous_support,
+        support_contact,
+        swing_contact,
+        nonfoot_clear,
+        vz,
+        env._slj_peak_height_gain,
+        min_takeoff_velocity,
+        min_height_gain,
+    )
+    takeoff &= active & env._slj_attempt_started
+    landing &= active
+    bad_contact &= active
+    env._slj_takeoff_event = takeoff
+    env._slj_landing_event = landing
+    env._slj_took_off |= takeoff
+    env._slj_landed |= landing
+    env._slj_stage[takeoff] = _SLJ_FLIGHT
+    env._slj_stage[landing] = _SLJ_RECOVERY
+    env._slj_recovery_s[landing] = 0.0
+    env._slj_failed |= bad_contact
+
+    short_landing = (
+        active
+        & (env._slj_stage == _SLJ_FLIGHT)
+        & support_contact
+        & ~landing
+    )
+    env._slj_failed |= short_landing
+
+    recovering = active & (env._slj_stage == _SLJ_RECOVERY)
+    recovery_valid = single_leg_success_state(
+        env,
+        command_name=command_name,
+        sensor_name=sensor_name,
+        asset_cfg=asset_cfg,
+        nonfoot_sensor_name=nonfoot_sensor_name,
+        min_clearance=0.003,
+        max_tilt_deg=35.0,
+        max_lin_vel=0.08,
+        max_ang_vel=0.8,
+        require_com_inside=False,
+    ).bool()
+    env._slj_recovery_s = torch.where(
+        recovering & recovery_valid,
+        env._slj_recovery_s + env.step_dt,
+        torch.where(
+            recovering,
+            torch.zeros_like(env._slj_recovery_s),
+            env._slj_recovery_s,
+        ),
+    )
+    env._slj_max_recovery_s = torch.maximum(
+        env._slj_max_recovery_s, env._slj_recovery_s
+    )
+    env._slj_failed |= recovering & (swing_contact | ~nonfoot_clear)
+    completed = recovering & (env._slj_recovery_s >= recovery_s)
+    env._slj_completion_event = completed
+    env._slj_completed |= completed
+    transaction_expired = (
+        getattr(
+            term,
+            "transaction_is_jump",
+            torch.zeros(
+                env.num_envs, dtype=torch.bool, device=env.device
+            ),
+        )
+        & getattr(
+            term,
+            "returning",
+            torch.zeros(
+                env.num_envs, dtype=torch.bool, device=env.device
+            ),
+        )
+        & ~env._slj_completed
+    )
+    env._slj_failed |= transaction_expired
+    env._slj_stage[env._slj_completed] = _SLJ_COMPLETE
+    env._slj_stage[env._slj_failed] = _SLJ_FAILED
+
+    env._slj_previous_support = support_contact
+    env._slj_previous_command_phase = command_phase.clone()
+    env._slj_last_update = step
+
+
+def single_leg_jump_success(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    return env._slj_completed
+
+
+def single_leg_jump_failure(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    return env._slj_failed
+
+
+def single_leg_jump_completion_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    return env._slj_completion_event.float() / env.step_dt
+
+
+def single_leg_jump_banked_height_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    target_height_gain: float = 0.01,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    normalized = torch.clamp(
+        env._slj_peak_height_gain / max(target_height_gain, 1e-6),
+        min=0.0,
+    )
+    reset_kind = getattr(env, "_slj_reset_kind", None)
+    if reset_kind is None:
+        reset_kind = torch.zeros_like(
+            env._slj_peak_height_gain,
+            dtype=torch.long,
+        )
+    earned_height = reset_kind != 2
+    return (
+        env._slj_completion_event.float()
+        * earned_height
+        * normalized
+        / env.step_dt
+    )
+
+
+def _update_single_leg_jump_return(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float,
+    min_height_gain: float,
+    recovery_s: float,
+    return_hold_s: float,
+) -> None:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    step = int(env.common_step_counter)
+    if getattr(env, "_slj_return_step", None) == step:
+        return
+    if not hasattr(env, "_slj_return_hold_s"):
+        env._slj_return_hold_s = torch.zeros(env.num_envs, device=env.device)
+        env._slj_return_completed = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+        env._slj_return_event = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    fresh = env.episode_length_buf <= 1
+    env._slj_return_hold_s[fresh] = 0.0
+    env._slj_return_completed[fresh] = False
+    term = env.command_manager.get_term(command_name)
+    transaction_jump = getattr(
+        term,
+        "transaction_is_jump",
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+    )
+    returning = getattr(
+        term,
+        "returning",
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+    )
+    valid = (
+        transaction_jump
+        & returning
+        & env._slj_completed
+        & single_leg_success_state(
+            env,
+            command_name=command_name,
+            sensor_name=sensor_name,
+            asset_cfg=asset_cfg,
+            nonfoot_sensor_name=nonfoot_sensor_name,
+            min_clearance=0.003,
+            max_tilt_deg=35.0,
+            max_lin_vel=0.08,
+            max_ang_vel=0.8,
+            require_com_inside=False,
+        ).bool()
+    )
+    env._slj_return_hold_s = torch.where(
+        valid,
+        env._slj_return_hold_s + env.step_dt,
+        torch.zeros_like(env._slj_return_hold_s),
+    )
+    completed = (
+        ~env._slj_return_completed
+        & (env._slj_return_hold_s >= return_hold_s)
+    )
+    env._slj_return_event = completed
+    env._slj_return_completed |= completed
+    env._slj_return_step = step
+
+
+def single_leg_jump_return_success(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+    return_hold_s: float = 1.0,
+) -> torch.Tensor:
+    _update_single_leg_jump_return(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+        return_hold_s,
+    )
+    return env._slj_return_completed
+
+
+def single_leg_jump_return_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+    return_hold_s: float = 1.0,
+) -> torch.Tensor:
+    _update_single_leg_jump_return(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+        return_hold_s,
+    )
+    return env._slj_return_event.float() / env.step_dt
+
+
+def _single_leg_jump_frontier_delta(
+    frontier: torch.Tensor,
+    paid: torch.Tensor,
+    target: float,
+) -> torch.Tensor:
+    current = torch.clamp(frontier / max(target, 1e-6), 0.0, 1.0)
+    previous = torch.clamp(paid / max(target, 1e-6), 0.0, 1.0)
+    return torch.clamp(current - previous, min=0.0)
+
+
+def single_leg_jump_banked_compression_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    compression_scale: float = 0.01,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    normalized = torch.clamp(
+        env._slj_max_compression / max(compression_scale, 1e-6),
+        min=0.0,
+    )
+    reset_kind = getattr(env, "_slj_reset_kind", None)
+    if reset_kind is None:
+        reset_kind = torch.zeros_like(
+            env._slj_max_compression,
+            dtype=torch.long,
+        )
+    earned_compression = reset_kind == 0
+    return (
+        env._slj_completion_event.float()
+        * earned_compression
+        * normalized
+        / env.step_dt
+    )
+
+
+def single_leg_jump_upward_progress(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    target_velocity: float = 0.15,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    reward = _single_leg_jump_frontier_delta(
+        env._slj_max_upward_velocity,
+        env._slj_paid_upward_velocity,
+        target_velocity,
+    )
+    env._slj_paid_upward_velocity = torch.maximum(
+        env._slj_paid_upward_velocity, env._slj_max_upward_velocity
+    )
+    return reward / env.step_dt
+
+
+def single_leg_jump_takeoff_event(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    return env._slj_takeoff_event.float() / env.step_dt
+
+
+def single_leg_jump_landing_event(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    return env._slj_landing_event.float() / env.step_dt
+
+
+def single_leg_jump_recovery_progress(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    reward = _single_leg_jump_frontier_delta(
+        env._slj_max_recovery_s,
+        env._slj_paid_recovery,
+        recovery_s,
+    )
+    env._slj_paid_recovery = torch.maximum(
+        env._slj_paid_recovery, env._slj_max_recovery_s
+    )
+    return reward / env.step_dt
+
+
+def single_leg_jump_metric(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    metric: str,
+    support_side: int,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    """Per-environment jump outcome for one commanded support side."""
+    if support_side not in (-1, 1):
+        raise ValueError("support_side must be -1 or 1")
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    side, _, _, _ = _single_leg_command_state(env, command_name)
+    selected = (
+        env.command_manager.get_term(command_name).is_jump
+        & (side == float(support_side))
+    )
+    if metric == "command_count":
+        return selected.float()
+    elif metric == "takeoff_rate":
+        return (env._slj_took_off & selected).float()
+    elif metric == "landing_rate":
+        return (env._slj_landed & selected).float()
+    elif metric == "completion_rate":
+        return (env._slj_completed & selected).float()
+    elif metric == "failure_rate":
+        return (env._slj_failed & selected).float()
+    elif metric == "peak_height_gain":
+        return env._slj_peak_height_gain * selected
+    else:
+        raise ValueError(f"unknown single-leg jump metric: {metric}")
 
 
 def ball_pos_in_base(

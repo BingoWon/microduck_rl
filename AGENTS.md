@@ -25,6 +25,91 @@ uv run --with pytest pytest tests/
 A 5-iteration smoke test at 64 envs catches ~95% of config errors for cents.
 Never launch a long run without one.
 
+## Paid GPU training continuity — permanent red lines
+
+- **A paid GPU must always have exactly one useful Trainer.** Preparing code,
+  documentation, evaluators, viewers, or the next candidate happens while the
+  current promotable Trainer keeps running. Do not stop first and then design,
+  patch, test, copy, or decide.
+- Training changes use `ACTIVE -> REPLACEMENT_READY -> SWITCHING -> ACTIVE`.
+  `REPLACEMENT_READY` means the replacement code is implemented and pushed,
+  its source checkpoint and rollback checkpoint are recorded, the command is
+  complete, and its promotion/rejection metrics are fixed before switching.
+- Switch only at a saved checkpoint boundary. Stop the old process group and
+  start the replacement immediately. A zero-Trainer window longer than 15
+  seconds is an operations incident; if replacement startup fails, resume the
+  previous checkpoint rather than leaving the GPU idle.
+- Never run two Trainers on one GPU. Before and after every switch, scan the
+  process tree and treat the launcher plus all descendants as one process
+  group. Evaluators run locally on synchronized checkpoints by default and
+  must not interrupt the remote Trainer.
+- **A PID is not proof of training.** Report training as active only after a
+  `Learning iteration` line advances and GPU work is visible. During the
+  known 8192-env CPU construction period, report "initializing", not
+  "training".
+- Checkpoint gates must be promotable continuations, not disposable
+  benchmarks. Preserve actor, critic, optimizer, iteration, curriculum counter,
+  and normalizers. A winning gate continues directly; do not retrain it from
+  the same starting actor.
+- **A known-invalid Trainer is a P0 cost incident and must be replaced
+  immediately.** Never keep it running while implementing, testing, deploying,
+  or waiting for its successor. If the corrected candidate is not already
+  runnable, immediately resume the last known-valid checkpoint and training
+  contract, then prepare the correction while that valid rollback runs. The
+  only acceptable states are a useful Trainer or the sub-15-second atomic
+  switch window; GPU utilization by a known-useless policy does not count.
+- **TensorBoard training trends are an immediate rejection gate.** A clear
+  regression or lack of progress in the primary behavior metrics—completion,
+  takeoff, landing, recovery, or jump height—is sufficient to reject and
+  replace a run immediately. A separate deterministic rollout is required only
+  to promote a checkpoint or claim final success; it must never delay rejection
+  of an obviously flat or regressing Trainer. Never discard, hide, or ignore
+  negative TensorBoard evidence merely because fixed evaluation is pending.
+- Use deterministic fixed-side evaluation for promotion. Training-time
+  stochastic completion is diagnostic only. Every evaluator that fixes a
+  command side must also fix `reset_single_leg_jump.fixed_side`; otherwise
+  the result is invalid.
+- TensorBoard must contain both training-distribution metrics and local
+  deterministic evaluation metrics. `auto_eval_checkpoints.py` evaluates
+  synchronized checkpoints without pausing the Trainer and writes
+  `Evaluation/{side}/...` series into the mirrored active run.
+- For inherited/BC actors, lock or explicitly audit action standard deviation,
+  entropy, learning rate, and optimizer updates. The 2026-09-03 failure
+  expanded v6 std from 0.005 to 0.025–0.031 and erased deterministic hopping.
+- Vast operations require one price monitor and one training monitor. A price
+  change, instance error, SSH failure, stale iteration, NaN, CUDA error, OOM,
+  or checkpoint-sync failure must create an explicit attention record.
+  Monitoring failure must not kill training and must retry rather than exit.
+- Use the current SSH endpoint from `vastai ssh-url`; keep a direct-IP fallback
+  and a proxy-IP fallback because `sshN.vast.ai` DNS can fail locally. Never
+  assume a stale SSH alias still targets the current instance.
+- Do not destroy an instance until all checkpoints, configs, logs, evaluations,
+  and SHA-256 manifests are synchronized and verified locally. A failed host is
+  blacklisted before the offer watcher resumes.
+- Every training-status response starts with iteration/target and steps/s,
+  followed immediately by the available performance trend: baseline, previous
+  checkpoint, current checkpoint, absolute delta, and an explicit `improving`
+  / `flat` / `regressing` verdict. Break out left and right takeoff, landing,
+  recovery completion, and height where available. Label training-distribution
+  trends as provisional and deterministic fixed-side results as promotion
+  evidence, but act on either source when it clearly proves regression. Never
+  replace a trend with GPU utilization, total reward, or one uncontextualized
+  value.
+- Every model-performance report must make the reported model directly
+  viewable, not merely describe it. Before reporting, verify three identities:
+  the newest requested remote checkpoint, the atomically synchronized local
+  file, and the checkpoint actively served at `http://127.0.0.1:8080` must
+  match. Report the exact checkpoint, SHA-256, viewer URL, and whether it is
+  `latest`, `evaluated`, and/or `promoted best`. Use
+  `auto_view_latest_checkpoint.py` when the user requests the latest model;
+  it downloads each complete checkpoint and restarts the low-priority viewer
+  without operating the browser page. Never claim the user can see a model
+  until `viewer-status.json` confirms `latest_remote_step == shown_step` and
+  port 8080 is listening.
+
+The full incident record and reusable Vast procedure are in
+`docs/2026-09-03-vast-paid-gpu-training-operations.md`.
+
 ## Repo map
 
 - `src/mjlab_microduck/tasks/mdp.py` — ALL custom MDP functions (rewards, events,
@@ -43,6 +128,8 @@ Never launch a long run without one.
   gate + Hub upload. Contract = `docs/policy-manifest.md` in the `microduck` repo; only
   constant-command episodic/perpetual policies are publishable (phase/posture-flag are the set's).
 - `scripts/` — export wrapper, infer, sim2real comparison, wandb helpers.
+- `scripts/single_leg_jump/` — stable single-leg viewer/evaluator/harvester/
+  recorder entry points and training-status tooling.
 - `tests/` — cfg-invariant and mdp-function regression tests (CPU, no GPU needed).
 
 ## Invariants — do not break these
@@ -129,11 +216,30 @@ Never launch a long run without one.
   instead of sagittal, head-tripod instead of standing). Encode what counts as
   the maneuver in hard state-based gates (support contact, orientation-axis
   checks, latches), not in small penalty nudges.
+- **A command clock may open a maneuver phase; it can never prove failure.**
+  Missing a preparatory predicate or not leaving the ground at the nominal
+  compression/extension boundary means no progress reward, not termination.
+  Never cut off an action that still has physical momentum and could succeed
+  on a later simulation step. Hard failure requires an observed unsafe or
+  irreversible post-takeoff/landing state, NaN, terrain exit, or the ordinary
+  episode time limit.
+- The default viewer must mirror the real training/deployment maneuver cadence:
+  preserve the task's episode length and success/failure terminations so a
+  one-shot action visibly completes and resets. Infinite episodes and removed
+  terminations are allowed only behind an explicit `--diagnostic` flag; never
+  use diagnostic timing for the viewer presented as actual model behavior.
 - **No jackpots:** any "reach X" reward must be rate-limited or slewed.
   Arriving early at a goal state that then pays per-step is a jackpot that
   buys arbitrary violence. For commanded transitions, track a slewed internal
   target (constant-rate blend) — being ahead of the ramp pays zero, so slow IS
   the argmax. Speed-cap penalties alone integrate to a bounded cost and lose.
+- **Do not cap a user-requested objective magnitude by default.** Jump height,
+  compression depth, distance, and similar "more is better" goals remain
+  linear and uncapped; a `target_*` value may define reward units but must not
+  silently become a maximum payout. If safety requires a cap, document the
+  measured physical reason and get explicit user agreement. Bank potentially
+  exploitable magnitude rewards behind successful completion and recovery so
+  crashing cannot collect them.
 - **Never gate a positive reward on being in a bad state** (fallen, low) — the
   policy parks in the cheapest qualifying pose and farms it. Use
   potential-based shaping instead (pay Δprogress, e.g. Δcos(tilt): rising pays,

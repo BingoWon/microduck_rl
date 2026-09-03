@@ -87,11 +87,17 @@ Never launch a long run without one.
   If the active run has no completed fixed evaluation yet, say `unevaluated`;
   never infer improvement from training rewards, GPU utilization, or a single
   uncontextualized value.
-- A local viewer loads one explicit immutable checkpoint at process startup; a
-  browser refresh or a newly synchronized checkpoint does not update it.
-  Never silently point a viewer at the newest unvalidated checkpoint. Report
-  the exact loaded checkpoint and whether it is the current promoted best;
-  switching the displayed model requires restarting the viewer process.
+- Every model-performance report must make the reported model directly
+  viewable, not merely describe it. Before reporting, verify three identities:
+  the newest requested remote checkpoint, the atomically synchronized local
+  file, and the checkpoint actively served at `http://127.0.0.1:8080` must
+  match. Report the exact checkpoint, SHA-256, viewer URL, and whether it is
+  `latest`, `evaluated`, and/or `promoted best`. Use
+  `auto_view_latest_checkpoint.py` when the user requests the latest model;
+  it downloads each complete checkpoint and restarts the low-priority viewer
+  without operating the browser page. Never claim the user can see a model
+  until `viewer-status.json` confirms `latest_remote_step == shown_step` and
+  port 8080 is listening.
 
 The full incident record and reusable Vast procedure are in
 `docs/2026-09-03-vast-paid-gpu-training-operations.md`.

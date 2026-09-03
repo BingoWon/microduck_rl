@@ -224,6 +224,27 @@ def test_frontier_progress_pays_only_new_maximum():
     assert torch.allclose(reward, torch.tensor([0.0, 0.5, 0.0, 0.0]))
 
 
+def test_frontier_reward_survives_reward_manager_dt_scaling(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp, "_update_single_leg_jump", lambda *args, **kwargs: None
+    )
+    env = SimpleNamespace(
+        step_dt=0.02,
+        _slj_max_compression=torch.tensor([0.005]),
+        _slj_paid_compression=torch.tensor([0.0]),
+    )
+    raw_rate = microduck_mdp.single_leg_jump_compression_progress(
+        env,
+        command_name="twist",
+        sensor_name="feet",
+        nonfoot_sensor_name="nonfoot",
+        asset_cfg=None,
+        target_compression=0.01,
+    )
+    scaled_reward = raw_rate * 0.5 * env.step_dt
+    assert torch.allclose(scaled_reward, torch.tensor([0.25]))
+
+
 def test_terminal_reward_is_exact_and_failed_height_bank_is_discarded(monkeypatch):
     monkeypatch.setattr(
         microduck_mdp, "_update_single_leg_jump", lambda *args, **kwargs: None

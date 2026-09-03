@@ -6897,7 +6897,7 @@ def single_leg_jump_compression_progress(
     env._slj_paid_compression = torch.maximum(
         env._slj_paid_compression, env._slj_max_compression
     )
-    return reward
+    return reward / env.step_dt
 
 
 def single_leg_jump_upward_progress(
@@ -6929,7 +6929,7 @@ def single_leg_jump_upward_progress(
     env._slj_paid_upward_velocity = torch.maximum(
         env._slj_paid_upward_velocity, env._slj_max_upward_velocity
     )
-    return reward
+    return reward / env.step_dt
 
 
 def single_leg_jump_takeoff_event(
@@ -7006,7 +7006,7 @@ def single_leg_jump_recovery_progress(
     env._slj_paid_recovery = torch.maximum(
         env._slj_paid_recovery, env._slj_max_recovery_s
     )
-    return reward
+    return reward / env.step_dt
 
 
 def single_leg_jump_metric(

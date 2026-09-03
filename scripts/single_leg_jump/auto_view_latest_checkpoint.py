@@ -4,9 +4,7 @@
 import argparse
 import hashlib
 import json
-import os
 import re
-import signal
 import socket
 import subprocess
 import sys
@@ -91,23 +89,15 @@ def sync_checkpoint(
     return destination
 
 
-def stop_process_group(pid: int | None) -> None:
-    if pid is None:
+def stop_viewer(process: subprocess.Popen | None) -> None:
+    if process is None or process.poll() is not None:
         return
+    process.terminate()
     try:
-        os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.1)
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def port_ready(port: int) -> bool:
@@ -148,7 +138,7 @@ def start_viewer(
         if port_ready(port):
             return process
         time.sleep(0.1)
-    stop_process_group(process.pid)
+    stop_viewer(process)
     raise RuntimeError("viewer did not open its port")
 
 
@@ -165,7 +155,7 @@ def main() -> None:
     args.local_dir.mkdir(parents=True, exist_ok=True)
     args.state_dir.mkdir(parents=True, exist_ok=True)
     status_path = args.state_dir / "viewer-status.json"
-    viewer_pid = None
+    viewer = None
     shown_step = -1
 
     while True:
@@ -174,13 +164,7 @@ def main() -> None:
                 args.host,
                 args.remote_run,
             )
-            viewer_alive = False
-            if viewer_pid is not None:
-                try:
-                    os.kill(viewer_pid, 0)
-                    viewer_alive = True
-                except ProcessLookupError:
-                    pass
+            viewer_alive = viewer is not None and viewer.poll() is None
             if step != shown_step or not viewer_alive:
                 checkpoint = sync_checkpoint(
                     args.host,
@@ -188,14 +172,13 @@ def main() -> None:
                     size,
                     args.local_dir,
                 )
-                stop_process_group(viewer_pid)
+                stop_viewer(viewer)
                 viewer = start_viewer(
                     checkpoint,
                     args.port,
                     args.device,
                     args.state_dir / "viewer.log",
                 )
-                viewer_pid = viewer.pid
                 shown_step = step
                 write_json(
                     status_path,
@@ -206,7 +189,7 @@ def main() -> None:
                         "sha256": hashlib.sha256(
                             checkpoint.read_bytes()
                         ).hexdigest(),
-                        "viewer_pid": viewer_pid,
+                        "viewer_pid": viewer.pid,
                         "url": f"http://127.0.0.1:{args.port}",
                         "updated_at": datetime.now(UTC).isoformat(),
                     },

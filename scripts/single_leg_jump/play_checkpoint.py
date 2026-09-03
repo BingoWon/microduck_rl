@@ -29,7 +29,8 @@ def main() -> None:
     command_cfg.fixed_mode = 1
     command_cfg.resampling_time_range = (3600.0, 3600.0)
     env_cfg.events["reset_single_leg_jump"].params["fixed_side"] = -1
-    env_cfg.terminations.pop("jump_success", None)
+    for name in ("jump_success", "jump_failure", "root_too_low", "fell_over"):
+        env_cfg.terminations.pop(name, None)
 
     agent_cfg = load_rl_cfg(TASK)
     env = RslRlVecEnvWrapper(

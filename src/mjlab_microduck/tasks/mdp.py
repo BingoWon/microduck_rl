@@ -6513,11 +6513,7 @@ def single_leg_jump_transition_flags(
         & (peak_height_gain >= min_height_gain)
     )
     bad_contact = (
-        (
-            ((stage == _SLJ_PREPARE) & initial_grounded)
-            | (stage == _SLJ_FLIGHT)
-            | (stage == _SLJ_RECOVERY)
-        )
+        ((stage == _SLJ_FLIGHT) | (stage == _SLJ_RECOVERY))
         & (swing_contact | ~nonfoot_clear)
     )
     return takeoff, landing, bad_contact
@@ -6797,8 +6793,6 @@ def _update_single_leg_jump(
         torch.maximum(env._slj_max_upward_velocity, torch.clamp(vz, min=0.0)),
         env._slj_max_upward_velocity,
     )
-    env._slj_failed |= entering_compression & ~env._slj_initial_grounded
-
     tracking_peak = active & env._slj_attempt_started
     height_gain = torch.clamp(z - env._slj_baseline_z, min=0.0)
     env._slj_peak_height_gain = torch.where(
@@ -6838,15 +6832,6 @@ def _update_single_leg_jump(
         & ~landing
     )
     env._slj_failed |= short_landing
-
-    block_finished = (
-        active
-        & env._slj_attempt_started
-        & (env._slj_previous_command_phase > 0.0)
-        & (command_phase == 0.0)
-        & (env._slj_stage == _SLJ_PREPARE)
-    )
-    env._slj_failed |= block_finished
 
     recovering = active & (env._slj_stage == _SLJ_RECOVERY)
     recovery_valid = single_leg_success_state(

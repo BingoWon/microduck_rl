@@ -417,14 +417,24 @@ def test_full_takeoff_landing_recovery_transition(monkeypatch):
     microduck_mdp.reset_single_leg_jump_state(
         env, torch.tensor([0]), state_bank_path=None
     )
+    env._test_contacts[:] = torch.tensor([[1.0, 1.0]])
+    term.is_jump[:] = True
+    for step, phase in ((30, -1.0), (31, 1.0), (32, 0.0)):
+        env.common_step_counter = step
+        command[:, 2] = phase
+        assert not bool(microduck_mdp.single_leg_jump_failure(env, **params)[0])
+
+    microduck_mdp.reset_single_leg_jump_state(
+        env, torch.tensor([0]), state_bank_path=None
+    )
     term.is_jump[:] = False
     term.transaction_is_jump = torch.tensor([True])
     term.returning = torch.tensor([True])
-    env.common_step_counter = 30
+    env.common_step_counter = 33
     assert bool(microduck_mdp.single_leg_jump_failure(env, **params)[0])
 
 
-def test_wrong_contact_fails_before_takeoff_once_single_leg_is_established():
+def test_wrong_contact_does_not_end_an_attempt_before_takeoff():
     _, _, failed = microduck_mdp.single_leg_jump_transition_flags(
         stage=torch.tensor([0, 0, 0]),
         initial_grounded=torch.tensor([True, True, False]),
@@ -437,7 +447,7 @@ def test_wrong_contact_fails_before_takeoff_once_single_leg_is_established():
         min_takeoff_velocity=0.02,
         min_height_gain=0.003,
     )
-    assert failed.tolist() == [True, True, False]
+    assert failed.tolist() == [False, False, False]
 
 
 def test_reverse_curriculum_uses_harvested_states_and_anneals_to_standing():

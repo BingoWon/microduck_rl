@@ -7,6 +7,7 @@ from mjlab.tasks.registry import list_tasks, load_runner_cls
 
 from mjlab_microduck.tasks import (
     MicroduckActorWarmStartRunner,
+    MicroduckOnPolicyRunner,
     mdp as microduck_mdp,
 )
 from mjlab_microduck.tasks.microduck_single_leg_jump_env_cfg import (
@@ -52,13 +53,103 @@ def test_play_mode_can_be_fixed(monkeypatch):
         make_microduck_single_leg_jump_env_cfg(play=True)
 
 
-def test_task_uses_actor_only_warm_start_runner():
+def test_task_uses_jump_warm_start_runner():
     assert "Mjlab-SingleLegJump-Flat-MicroDuck" in list_tasks()
     assert (
         load_runner_cls("Mjlab-SingleLegJump-Flat-MicroDuck")
         is MicroduckActorWarmStartRunner
     )
     assert MicroduckSingleLegJumpRlCfg.experiment_name == "single_leg_jump"
+
+
+def _runner_stub():
+    runner = object.__new__(MicroduckActorWarmStartRunner)
+    runner.current_learning_iteration = 0
+    runner.env = SimpleNamespace(
+        unwrapped=SimpleNamespace(common_step_counter=19)
+    )
+    return runner
+
+
+def test_native_jump_checkpoint_uses_full_resume(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "native.pt"
+    torch.save({"infos": {}}, checkpoint)
+    calls = []
+
+    def fake_load(self, path, load_cfg=None, strict=True, map_location=None):
+        calls.append(load_cfg)
+        self.current_learning_iteration = 123
+        return {"native": True}
+
+    monkeypatch.setattr(MicroduckOnPolicyRunner, "load", fake_load)
+    runner = _runner_stub()
+    assert runner.load(checkpoint) == {"native": True}
+    assert calls == [None]
+    assert runner.current_learning_iteration == 123
+    assert runner.env.unwrapped.common_step_counter == 19
+
+
+def test_v6_checkpoint_forces_actor_only_warm_start(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "v6.pt"
+    torch.save({"infos": {"hop_command_pretrained": True}}, checkpoint)
+    calls = []
+
+    def fake_load(self, path, load_cfg=None, strict=True, map_location=None):
+        calls.append(load_cfg)
+        self.current_learning_iteration = 123
+        return {"v6": True}
+
+    monkeypatch.setattr(MicroduckOnPolicyRunner, "load", fake_load)
+    runner = _runner_stub()
+    assert runner.load(checkpoint) == {"v6": True}
+    assert calls == [{"actor": True}]
+    assert runner.current_learning_iteration == 0
+    assert runner.env.unwrapped.common_step_counter == 0
+
+
+def test_explicit_stand_warm_start_resets_new_command_inputs(
+    monkeypatch, tmp_path
+):
+    checkpoint = tmp_path / "stand.pt"
+    torch.save({"infos": {}}, checkpoint)
+    monkeypatch.setenv("SINGLE_LEG_JUMP_ACTOR_WARM_START", "1")
+    monkeypatch.setattr(
+        MicroduckOnPolicyRunner,
+        "load",
+        lambda self, *args, **kwargs: {},
+    )
+    runner = _runner_stub()
+    runner.alg = SimpleNamespace(
+        actor=SimpleNamespace(
+            mlp=[SimpleNamespace(weight=torch.ones(2, 61))],
+            obs_normalizer=SimpleNamespace(
+                _mean=torch.ones(61),
+                _var=torch.full((61,), 2.0),
+                _std=torch.full((61,), 3.0),
+            ),
+        )
+    )
+    runner.load(checkpoint)
+    assert torch.equal(
+        runner.alg.actor.mlp[0].weight[:, [48, 50]], torch.zeros(2, 2)
+    )
+    assert torch.equal(
+        runner.alg.actor.obs_normalizer._mean[[48, 50]], torch.zeros(2)
+    )
+    assert torch.equal(
+        runner.alg.actor.obs_normalizer._var[[48, 50]], torch.ones(2)
+    )
+    assert torch.equal(
+        runner.alg.actor.obs_normalizer._std[[48, 50]], torch.ones(2)
+    )
+
+
+def test_invalid_explicit_warm_start_value_is_rejected(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "stand.pt"
+    torch.save({"infos": {}}, checkpoint)
+    monkeypatch.setenv("SINGLE_LEG_JUMP_ACTOR_WARM_START", "sometimes")
+    with pytest.raises(ValueError):
+        _runner_stub().load(checkpoint)
 
 
 def test_terminal_rewards_are_banked_until_success():
@@ -309,6 +400,55 @@ def test_training_metrics_are_split_by_support_side():
             assert term.func is microduck_mdp.single_leg_jump_metric
             assert term.reduce == "last"
             assert term.params["support_side"] == (-1 if side == "left" else 1)
+
+
+def test_training_metrics_return_per_environment_values(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp, "_update_single_leg_jump", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        microduck_mdp,
+        "_single_leg_command_state",
+        lambda *args: (
+            torch.tensor([-1.0, -1.0, 1.0, -1.0]),
+            None,
+            None,
+            None,
+        ),
+    )
+    env = SimpleNamespace(
+        num_envs=4,
+        command_manager=SimpleNamespace(
+            get_term=lambda name: SimpleNamespace(
+                is_jump=torch.tensor([True, False, True, True])
+            )
+        ),
+        _slj_took_off=torch.tensor([True, True, False, False]),
+        _slj_landed=torch.tensor([True, False, False, False]),
+        _slj_completed=torch.tensor([False, False, False, False]),
+        _slj_failed=torch.tensor([False, False, True, True]),
+        _slj_peak_height_gain=torch.tensor([0.01, 0.02, 0.03, 0.04]),
+    )
+    params = {
+        "command_name": "twist",
+        "sensor_name": "feet",
+        "nonfoot_sensor_name": "nonfoot",
+        "asset_cfg": None,
+        "support_side": -1,
+    }
+    expected = {
+        "command_count": [1.0, 0.0, 0.0, 1.0],
+        "takeoff_rate": [1.0, 0.0, 0.0, 0.0],
+        "landing_rate": [1.0, 0.0, 0.0, 0.0],
+        "completion_rate": [0.0, 0.0, 0.0, 0.0],
+        "failure_rate": [0.0, 0.0, 0.0, 1.0],
+        "peak_height_gain": [0.01, 0.0, 0.0, 0.04],
+    }
+    for metric, values in expected.items():
+        actual = microduck_mdp.single_leg_jump_metric(
+            env, metric=metric, **params
+        )
+        assert actual.tolist() == pytest.approx(values)
 
 
 def test_jump_task_is_documented_in_readme():

@@ -7021,7 +7021,7 @@ def single_leg_jump_metric(
     min_height_gain: float = 0.003,
     recovery_s: float = 0.5,
 ) -> torch.Tensor:
-    """Batch metric for one commanded support side, broadcast for logging."""
+    """Per-environment jump outcome for one commanded support side."""
     if support_side not in (-1, 1):
         raise ValueError("support_side must be -1 or 1")
     _update_single_leg_jump(
@@ -7039,22 +7039,20 @@ def single_leg_jump_metric(
         env.command_manager.get_term(command_name).is_jump
         & (side == float(support_side))
     )
-    count = selected.sum().clamp_min(1)
     if metric == "command_count":
-        value = selected.sum().float()
+        return selected.float()
     elif metric == "takeoff_rate":
-        value = (env._slj_took_off & selected).sum().float() / count
+        return (env._slj_took_off & selected).float()
     elif metric == "landing_rate":
-        value = (env._slj_landed & selected).sum().float() / count
+        return (env._slj_landed & selected).float()
     elif metric == "completion_rate":
-        value = (env._slj_completed & selected).sum().float() / count
+        return (env._slj_completed & selected).float()
     elif metric == "failure_rate":
-        value = (env._slj_failed & selected).sum().float() / count
+        return (env._slj_failed & selected).float()
     elif metric == "peak_height_gain":
-        value = (env._slj_peak_height_gain * selected).sum() / count
+        return env._slj_peak_height_gain * selected
     else:
         raise ValueError(f"unknown single-leg jump metric: {metric}")
-    return value.expand(env.num_envs)
 
 
 def ball_pos_in_base(

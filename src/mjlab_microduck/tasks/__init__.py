@@ -24,15 +24,30 @@ class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
 
 
 class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
-    """Load only the actor and restart PPO state for a new skill."""
+    """Warm-start predecessor actors while preserving native jump resumes."""
 
     def load(self, path, load_cfg=None, strict=True, map_location=None):
+        import os
         import torch
 
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         jump_pretrained = bool(
             (checkpoint.get("infos") or {}).get("hop_command_pretrained", False)
         )
+        explicit = os.environ.get("SINGLE_LEG_JUMP_ACTOR_WARM_START", "").lower()
+        if explicit not in ("", "0", "false", "no", "1", "true", "yes"):
+            raise ValueError(
+                "SINGLE_LEG_JUMP_ACTOR_WARM_START must be 0/1, false/true, or no/yes"
+            )
+        warm_start = jump_pretrained or explicit in ("1", "true", "yes")
+        if not warm_start:
+            return super().load(
+                path,
+                load_cfg=load_cfg,
+                strict=strict,
+                map_location=map_location,
+            )
+
         infos = super().load(
             path,
             load_cfg={"actor": True},

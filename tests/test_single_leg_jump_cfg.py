@@ -174,3 +174,33 @@ def test_harvested_state_bank_is_balanced_and_well_formed():
                         ]
                     )
                 ).all()
+
+
+def test_discovery_shaping_is_bounded_and_anneals_to_zero():
+    cfg = make_microduck_single_leg_jump_env_cfg()
+    shaping = {
+        "jump_compression_progress": 0.5,
+        "jump_upward_progress": 0.5,
+        "jump_takeoff": 1.0,
+        "jump_landing": 1.0,
+        "jump_recovery_progress": 1.0,
+    }
+    assert sum(shaping.values()) == 4.0
+    assert cfg.rewards["jump_completion"].weight == 10.0
+    assert cfg.rewards["jump_height"].weight == 1.0
+    assert cfg.rewards["strict_single_leg_hold"].weight == 2.0
+    for name, weight in shaping.items():
+        assert cfg.rewards[name].weight == weight
+        stages = cfg.curriculum[f"{name}_weight"].params["weight_stages"]
+        assert stages[0]["weight"] == weight
+        assert stages[-1]["weight"] == 0.0
+    assert cfg.rewards["action_rate_l2"].weight == -0.01
+
+
+def test_frontier_progress_pays_only_new_maximum():
+    frontier = torch.tensor([0.0, 0.005, 0.02, 0.005])
+    paid = torch.tensor([0.0, 0.0, 0.01, 0.006])
+    reward = microduck_mdp._single_leg_jump_frontier_delta(
+        frontier, paid, target=0.01
+    )
+    assert torch.allclose(reward, torch.tensor([0.0, 0.5, 0.0, 0.0]))

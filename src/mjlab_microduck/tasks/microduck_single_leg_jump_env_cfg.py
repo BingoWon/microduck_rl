@@ -63,6 +63,7 @@ def make_microduck_single_leg_jump_env_cfg(
     )
 
     cfg.rewards["strict_single_leg_hold"].params["required_mode"] = "stand"
+    cfg.rewards["strict_single_leg_hold"].weight = 2.0
     cfg.rewards.pop("failed_episode", None)
     jump_params = {
         "command_name": COMMAND_NAME,
@@ -83,6 +84,33 @@ def make_microduck_single_leg_jump_env_cfg(
         weight=1.0,
         params={**jump_params, "target_height_gain": 0.01},
     )
+    cfg.rewards["jump_compression_progress"] = RewardTermCfg(
+        func=microduck_mdp.single_leg_jump_compression_progress,
+        weight=0.5,
+        params={**jump_params, "target_compression": 0.01},
+    )
+    cfg.rewards["jump_upward_progress"] = RewardTermCfg(
+        func=microduck_mdp.single_leg_jump_upward_progress,
+        weight=0.5,
+        params={**jump_params, "target_velocity": 0.15},
+    )
+    cfg.rewards["jump_takeoff"] = RewardTermCfg(
+        func=microduck_mdp.single_leg_jump_takeoff_event,
+        weight=1.0,
+        params=jump_params,
+    )
+    cfg.rewards["jump_landing"] = RewardTermCfg(
+        func=microduck_mdp.single_leg_jump_landing_event,
+        weight=1.0,
+        params=jump_params,
+    )
+    cfg.rewards["jump_recovery_progress"] = RewardTermCfg(
+        func=microduck_mdp.single_leg_jump_recovery_progress,
+        weight=1.0,
+        params=jump_params,
+    )
+    cfg.rewards["action_rate_l2"].weight = -0.01
+    cfg.rewards["joint_torque_rate_l2"].weight = -5e-4
 
     cfg.events["reset_single_leg_jump"] = EventTermCfg(
         func=microduck_mdp.reset_single_leg_jump_state,
@@ -147,6 +175,36 @@ def make_microduck_single_leg_jump_env_cfg(
                             "landing_prob": 0.0,
                         },
                     },
+                ],
+            },
+        )
+        for reward_name, initial_weight in (
+            ("jump_compression_progress", 0.5),
+            ("jump_upward_progress", 0.5),
+            ("jump_takeoff", 1.0),
+            ("jump_landing", 1.0),
+            ("jump_recovery_progress", 1.0),
+        ):
+            cfg.curriculum[f"{reward_name}_weight"] = CurriculumTermCfg(
+                func=microduck_mdp.reward_weight,
+                params={
+                    "reward_name": reward_name,
+                    "weight_stages": [
+                        {"step": 0, "weight": initial_weight},
+                        {"step": 1000 * 24, "weight": initial_weight * 0.5},
+                        {"step": 2000 * 24, "weight": initial_weight * 0.25},
+                        {"step": 3000 * 24, "weight": 0.0},
+                    ],
+                },
+            )
+        cfg.curriculum["jump_action_rate_weight"] = CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={
+                "reward_name": "action_rate_l2",
+                "weight_stages": [
+                    {"step": 0, "weight": -0.01},
+                    {"step": 2000 * 24, "weight": -0.03},
+                    {"step": 3000 * 24, "weight": -0.05},
                 ],
             },
         )

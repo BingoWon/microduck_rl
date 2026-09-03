@@ -6433,6 +6433,12 @@ def reset_single_leg_jump_state(
         env._slj_baseline_z = torch.zeros(n, device=env.device)
         env._slj_peak_height_gain = torch.zeros(n, device=env.device)
         env._slj_recovery_s = torch.zeros(n, device=env.device)
+        env._slj_max_recovery_s = torch.zeros(n, device=env.device)
+        env._slj_max_compression = torch.zeros(n, device=env.device)
+        env._slj_max_upward_velocity = torch.zeros(n, device=env.device)
+        env._slj_paid_recovery = torch.zeros(n, device=env.device)
+        env._slj_paid_compression = torch.zeros(n, device=env.device)
+        env._slj_paid_upward_velocity = torch.zeros(n, device=env.device)
         env._slj_completed = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._slj_failed = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._slj_takeoff_event = torch.zeros(
@@ -6452,6 +6458,12 @@ def reset_single_leg_jump_state(
     env._slj_baseline_z[env_ids] = 0.0
     env._slj_peak_height_gain[env_ids] = 0.0
     env._slj_recovery_s[env_ids] = 0.0
+    env._slj_max_recovery_s[env_ids] = 0.0
+    env._slj_max_compression[env_ids] = 0.0
+    env._slj_max_upward_velocity[env_ids] = 0.0
+    env._slj_paid_recovery[env_ids] = 0.0
+    env._slj_paid_compression[env_ids] = 0.0
+    env._slj_paid_upward_velocity[env_ids] = 0.0
     env._slj_completed[env_ids] = False
     env._slj_failed[env_ids] = False
     env._slj_takeoff_event[env_ids] = False
@@ -6554,6 +6566,17 @@ def reset_single_leg_jump_state(
             env._slj_attempt_started[ids] = True
             env._slj_baseline_z[ids] = states["baseline_z"][choices]
             env._slj_peak_height_gain[ids] = states["peak_height_gain"][choices]
+            compression = torch.clamp(
+                states["baseline_z"][choices] - states["root_pos"][choices, 2],
+                min=0.0,
+            )
+            upward = torch.clamp(
+                states["root_lin_vel"][choices, 2], min=0.0
+            )
+            env._slj_max_compression[ids] = compression
+            env._slj_paid_compression[ids] = compression
+            env._slj_max_upward_velocity[ids] = upward
+            env._slj_paid_upward_velocity[ids] = upward
             if kind == 1:
                 env._slj_previous_support[ids] = True
                 env._slj_previous_command_phase[ids] = -1.0
@@ -6616,6 +6639,26 @@ def _update_single_leg_jump(
         entering_compression,
         torch.zeros_like(env._slj_peak_height_gain),
         env._slj_peak_height_gain,
+    )
+    valid_pre_takeoff = (
+        active
+        & (env._slj_stage == _SLJ_PREPARE)
+        & env._slj_attempt_started
+        & support_contact
+        & ~swing_contact
+        & nonfoot_clear
+    )
+    compression = torch.clamp(env._slj_baseline_z - z, min=0.0)
+    env._slj_max_compression = torch.where(
+        valid_pre_takeoff,
+        torch.maximum(env._slj_max_compression, compression),
+        env._slj_max_compression,
+    )
+    extension = valid_pre_takeoff & (command_phase > 0.0)
+    env._slj_max_upward_velocity = torch.where(
+        extension,
+        torch.maximum(env._slj_max_upward_velocity, torch.clamp(vz, min=0.0)),
+        env._slj_max_upward_velocity,
     )
     env._slj_failed |= entering_compression & ~env._slj_initial_grounded
 
@@ -6687,6 +6730,9 @@ def _update_single_leg_jump(
             torch.zeros_like(env._slj_recovery_s),
             env._slj_recovery_s,
         ),
+    )
+    env._slj_max_recovery_s = torch.maximum(
+        env._slj_max_recovery_s, env._slj_recovery_s
     )
     env._slj_failed |= recovering & (
         ~support_contact | swing_contact | ~nonfoot_clear
@@ -6797,6 +6843,157 @@ def single_leg_jump_banked_height_reward(
         max=1.0,
     )
     return env._slj_completed.float() * normalized / env.step_dt
+
+
+def _single_leg_jump_frontier_delta(
+    frontier: torch.Tensor,
+    paid: torch.Tensor,
+    target: float,
+) -> torch.Tensor:
+    current = torch.clamp(frontier / max(target, 1e-6), 0.0, 1.0)
+    previous = torch.clamp(paid / max(target, 1e-6), 0.0, 1.0)
+    return torch.clamp(current - previous, min=0.0)
+
+
+def single_leg_jump_compression_progress(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    target_compression: float = 0.01,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    reward = _single_leg_jump_frontier_delta(
+        env._slj_max_compression,
+        env._slj_paid_compression,
+        target_compression,
+    )
+    env._slj_paid_compression = torch.maximum(
+        env._slj_paid_compression, env._slj_max_compression
+    )
+    return reward
+
+
+def single_leg_jump_upward_progress(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    target_velocity: float = 0.15,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    reward = _single_leg_jump_frontier_delta(
+        env._slj_max_upward_velocity,
+        env._slj_paid_upward_velocity,
+        target_velocity,
+    )
+    env._slj_paid_upward_velocity = torch.maximum(
+        env._slj_paid_upward_velocity, env._slj_max_upward_velocity
+    )
+    return reward
+
+
+def single_leg_jump_takeoff_event(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    return env._slj_takeoff_event.float() / env.step_dt
+
+
+def single_leg_jump_landing_event(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    return env._slj_landing_event.float() / env.step_dt
+
+
+def single_leg_jump_recovery_progress(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    min_takeoff_velocity: float = 0.02,
+    min_height_gain: float = 0.003,
+    recovery_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_jump(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        min_takeoff_velocity,
+        min_height_gain,
+        recovery_s,
+    )
+    reward = _single_leg_jump_frontier_delta(
+        env._slj_max_recovery_s,
+        env._slj_paid_recovery,
+        recovery_s,
+    )
+    env._slj_paid_recovery = torch.maximum(
+        env._slj_paid_recovery, env._slj_max_recovery_s
+    )
+    return reward
 
 
 def ball_pos_in_base(

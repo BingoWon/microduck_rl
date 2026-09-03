@@ -154,7 +154,7 @@ def evaluate(
             if len(done_ids) == 0:
                 continue
             reset_obs, _ = raw.reset(env_ids=done_ids)
-            for group in obs:
+            for group in obs.keys():  # noqa: SIM118 - TensorDict iterates values.
                 obs[group][done_ids] = reset_obs[group][done_ids]
             for tensor in (
                 target_hold,

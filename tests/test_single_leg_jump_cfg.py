@@ -374,6 +374,15 @@ def test_full_takeoff_landing_recovery_transition(monkeypatch):
     microduck_mdp.single_leg_jump_success(env, **params)
     assert env._slj_completion_event.tolist() == [False]
 
+    microduck_mdp.reset_single_leg_jump_state(
+        env, torch.tensor([0]), state_bank_path=None
+    )
+    term.is_jump[:] = False
+    term.transaction_is_jump = torch.tensor([True])
+    term.returning = torch.tensor([True])
+    env.common_step_counter = 30
+    assert bool(microduck_mdp.single_leg_jump_failure(env, **params)[0])
+
 
 def test_wrong_contact_fails_before_takeoff_once_single_leg_is_established():
     _, _, failed = microduck_mdp.single_leg_jump_transition_flags(
@@ -683,6 +692,49 @@ def test_completion_reward_is_an_event_not_a_post_success_jackpot(monkeypatch):
         asset_cfg=None,
     )
     assert reward.tolist() == [0.0]
+
+
+def test_return_reward_is_paid_once_after_a_valid_return(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp, "_update_single_leg_jump", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        microduck_mdp,
+        "single_leg_success_state",
+        lambda *args, **kwargs: torch.ones(1),
+    )
+    term = SimpleNamespace(
+        transaction_is_jump=torch.tensor([True]),
+        returning=torch.tensor([True]),
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        step_dt=0.5,
+        common_step_counter=0,
+        episode_length_buf=torch.tensor([2]),
+        command_manager=SimpleNamespace(get_term=lambda name: term),
+        _slj_completed=torch.tensor([True]),
+    )
+    params = {
+        "command_name": "twist",
+        "sensor_name": "feet",
+        "nonfoot_sensor_name": "nonfoot",
+        "asset_cfg": None,
+        "return_hold_s": 1.0,
+    }
+    assert microduck_mdp.single_leg_jump_return_reward(
+        env, **params
+    ).tolist() == [0.0]
+    env.common_step_counter = 1
+    assert microduck_mdp.single_leg_jump_return_reward(
+        env, **params
+    ).tolist() == [2.0]
+    env.common_step_counter = 2
+    assert microduck_mdp.single_leg_jump_return_reward(
+        env, **params
+    ).tolist() == [0.0]
+    assert env._slj_return_completed.tolist() == [True]
 
 
 def test_training_metrics_are_split_by_support_side():

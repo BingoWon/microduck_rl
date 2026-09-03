@@ -6877,6 +6877,24 @@ def _update_single_leg_jump(
     completed = recovering & (env._slj_recovery_s >= recovery_s)
     env._slj_completion_event = completed
     env._slj_completed |= completed
+    transaction_expired = (
+        getattr(
+            term,
+            "transaction_is_jump",
+            torch.zeros(
+                env.num_envs, dtype=torch.bool, device=env.device
+            ),
+        )
+        & getattr(
+            term,
+            "returning",
+            torch.zeros(
+                env.num_envs, dtype=torch.bool, device=env.device
+            ),
+        )
+        & ~env._slj_completed
+    )
+    env._slj_failed |= transaction_expired
     env._slj_stage[env._slj_completed] = _SLJ_COMPLETE
     env._slj_stage[env._slj_failed] = _SLJ_FAILED
 

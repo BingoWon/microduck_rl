@@ -6982,7 +6982,19 @@ def single_leg_jump_banked_height_reward(
         env._slj_peak_height_gain / max(target_height_gain, 1e-6),
         min=0.0,
     )
-    return env._slj_completion_event.float() * normalized / env.step_dt
+    reset_kind = getattr(env, "_slj_reset_kind", None)
+    if reset_kind is None:
+        reset_kind = torch.zeros_like(
+            env._slj_peak_height_gain,
+            dtype=torch.long,
+        )
+    earned_height = reset_kind != 2
+    return (
+        env._slj_completion_event.float()
+        * earned_height
+        * normalized
+        / env.step_dt
+    )
 
 
 def _update_single_leg_jump_return(

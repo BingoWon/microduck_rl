@@ -262,7 +262,7 @@ def test_terminal_rewards_are_banked_until_success():
     assert cfg.rewards["strict_single_leg_hold"].params["required_mode"] == "stand"
     assert "failed_episode" not in cfg.rewards
     assert cfg.rewards["jump_completion"].weight == 20.0
-    assert cfg.rewards["jump_height"].weight == 1.0
+    assert cfg.rewards["jump_height"].weight == 20.0
     assert "jump_success" in cfg.terminations
     assert "jump_failure" in cfg.terminations
     assert "reset_single_leg_jump" in cfg.events
@@ -464,9 +464,9 @@ def test_reverse_curriculum_uses_harvested_states_and_anneals_to_standing():
     ) == pytest.approx(1.0)
     stages = cfg.curriculum["jump_reset_mix"].params["param_stages"]
     assert stages[0]["params"] == {
-        "standing_prob": 0.35,
-        "compressed_prob": 0.15,
-        "airborne_prob": 0.50,
+        "standing_prob": 0.60,
+        "compressed_prob": 0.25,
+        "airborne_prob": 0.15,
     }
     assert stages[-1]["params"] == {
         "standing_prob": 1.0,
@@ -564,7 +564,7 @@ def test_discovery_shaping_is_bounded_and_anneals_to_zero():
     }
     assert sum(shaping.values()) == 8.0
     assert cfg.rewards["jump_completion"].weight == 20.0
-    assert cfg.rewards["jump_height"].weight == 1.0
+    assert cfg.rewards["jump_height"].weight == 20.0
     assert cfg.rewards["strict_single_leg_hold"].weight == 2.0
     for name, weight in shaping.items():
         assert cfg.rewards[name].weight == weight
@@ -635,8 +635,9 @@ def test_successful_height_reward_is_linear_and_uncapped(monkeypatch):
     )
     env = SimpleNamespace(
         step_dt=0.02,
-        _slj_completion_event=torch.tensor([True, True, False]),
+        _slj_completion_event=torch.tensor([True, True, True]),
         _slj_peak_height_gain=torch.tensor([0.01, 0.02, 0.05]),
+        _slj_reset_kind=torch.tensor([0, 1, 2]),
     )
     reward_rate = microduck_mdp.single_leg_jump_banked_height_reward(
         env,

@@ -89,7 +89,7 @@ def make_microduck_single_leg_jump_env_cfg(
     )
     cfg.rewards["jump_height"] = RewardTermCfg(
         func=microduck_mdp.single_leg_jump_banked_height_reward,
-        weight=1.0,
+        weight=20.0,
         params={**jump_params, "target_height_gain": 0.01},
     )
     cfg.rewards["jump_compression_progress"] = RewardTermCfg(
@@ -125,9 +125,9 @@ def make_microduck_single_leg_jump_env_cfg(
         mode="reset",
         params={
             "state_bank_path": str(RESET_STATE_BANK),
-            "standing_prob": 0.35 if not play else 1.0,
-            "compressed_prob": 0.15 if not play else 0.0,
-            "airborne_prob": 0.50 if not play else 0.0,
+            "standing_prob": 0.60 if not play else 1.0,
+            "compressed_prob": 0.25 if not play else 0.0,
+            "airborne_prob": 0.15 if not play else 0.0,
         },
     )
     cfg.terminations["jump_success"] = TerminationTermCfg(
@@ -167,25 +167,25 @@ def make_microduck_single_leg_jump_env_cfg(
                     {
                         "step": 0,
                         "params": {
-                            "standing_prob": 0.35,
-                            "compressed_prob": 0.15,
-                            "airborne_prob": 0.50,
+                            "standing_prob": 0.60,
+                            "compressed_prob": 0.25,
+                            "airborne_prob": 0.15,
                         },
                     },
                     {
                         "step": 1000 * 24,
                         "params": {
-                            "standing_prob": 0.60,
-                            "compressed_prob": 0.15,
-                            "airborne_prob": 0.25,
+                            "standing_prob": 0.75,
+                            "compressed_prob": 0.20,
+                            "airborne_prob": 0.05,
                         },
                     },
                     {
                         "step": 2000 * 24,
                         "params": {
                             "standing_prob": 0.90,
-                            "compressed_prob": 0.06,
-                            "airborne_prob": 0.04,
+                            "compressed_prob": 0.08,
+                            "airborne_prob": 0.02,
                         },
                     },
                     {

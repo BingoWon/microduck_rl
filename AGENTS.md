@@ -58,6 +58,13 @@ Never launch a long run without one.
   contract, then prepare the correction while that valid rollback runs. The
   only acceptable states are a useful Trainer or the sub-15-second atomic
   switch window; GPU utilization by a known-useless policy does not count.
+- **TensorBoard training trends are an immediate rejection gate.** A clear
+  regression or lack of progress in the primary behavior metrics—completion,
+  takeoff, landing, recovery, or jump height—is sufficient to reject and
+  replace a run immediately. A separate deterministic rollout is required only
+  to promote a checkpoint or claim final success; it must never delay rejection
+  of an obviously flat or regressing Trainer. Never discard, hide, or ignore
+  negative TensorBoard evidence merely because fixed evaluation is pending.
 - Use deterministic fixed-side evaluation for promotion. Training-time
   stochastic completion is diagnostic only. Every evaluator that fixes a
   command side must also fix `reset_single_leg_jump.fixed_side`; otherwise
@@ -80,13 +87,14 @@ Never launch a long run without one.
   and SHA-256 manifests are synchronized and verified locally. A failed host is
   blacklisted before the offer watcher resumes.
 - Every training-status response starts with iteration/target and steps/s,
-  followed immediately by a deterministic performance trend: baseline,
-  previous evaluated checkpoint, current evaluated checkpoint, absolute delta,
-  and an explicit `improving` / `flat` / `regressing` verdict. Break out left
-  and right takeoff, landing, recovery completion, and height where available.
-  If the active run has no completed fixed evaluation yet, say `unevaluated`;
-  never infer improvement from training rewards, GPU utilization, or a single
-  uncontextualized value.
+  followed immediately by the available performance trend: baseline, previous
+  checkpoint, current checkpoint, absolute delta, and an explicit `improving`
+  / `flat` / `regressing` verdict. Break out left and right takeoff, landing,
+  recovery completion, and height where available. Label training-distribution
+  trends as provisional and deterministic fixed-side results as promotion
+  evidence, but act on either source when it clearly proves regression. Never
+  replace a trend with GPU utilization, total reward, or one uncontextualized
+  value.
 - Every model-performance report must make the reported model directly
   viewable, not merely describe it. Before reporting, verify three identities:
   the newest requested remote checkpoint, the atomically synchronized local

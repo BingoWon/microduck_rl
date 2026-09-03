@@ -94,6 +94,8 @@ ultra model250 证明极低学习率可以保留并增强起跳/落地，但 mod
    每个 remote run 必须使用独立子目录，禁止不同 run 的
    `model_250.pt`、`model_500.pt` 相互覆盖。
 10. evaluator 从 `/tmp` checkpoint 本地异步运行，不暂停远端训练。
+    `auto_eval_checkpoints.py` 自动评估 model250/500/750/1000，并把
+    `Evaluation/{side}/...` 指标写入当前镜像 TensorBoard。
 11. 候选在 checkpoint 边界完成原子切换；失败立即恢复旧 checkpoint。
 12. 实例销毁前同步全部关键资产并验证归档 SHA-256。
 

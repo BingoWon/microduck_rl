@@ -11,6 +11,10 @@ Canonical reusable tools for the single-leg policy family:
 - `log_eval_tensorboard.py`: append evaluation results to TensorBoard.
 - `training_status.py`: one JSON snapshot of remote iteration, throughput,
   GPU, VRAM, power, and NaN state.
+- `sync_remote_tensorboard.py`: continuously mirror only the active remote
+  TensorBoard event file while checkpoints use their separate atomic sync.
+- `auto_eval_checkpoints.py`: evaluate synchronized model250/500/750/1000
+  checkpoints locally and publish deployment-style metrics into TensorBoard.
 
 Cloud operations and dated evidence remain outside the repository under:
 

@@ -58,6 +58,10 @@ Never launch a long run without one.
   stochastic completion is diagnostic only. Every evaluator that fixes a
   command side must also fix `reset_single_leg_jump.fixed_side`; otherwise
   the result is invalid.
+- TensorBoard must contain both training-distribution metrics and local
+  deterministic evaluation metrics. `auto_eval_checkpoints.py` evaluates
+  synchronized checkpoints without pausing the Trainer and writes
+  `Evaluation/{side}/...` series into the mirrored active run.
 - For inherited/BC actors, lock or explicitly audit action standard deviation,
   entropy, learning rate, and optimizer updates. The 2026-09-03 failure
   expanded v6 std from 0.005 to 0.025–0.031 and erased deterministic hopping.

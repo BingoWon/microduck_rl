@@ -40,6 +40,7 @@ def main() -> None:
     cfg.scene.num_envs = 1
     cfg.commands["twist"].fixed_side = side
     cfg.commands["twist"].fixed_mode = 1
+    cfg.events["reset_single_leg_jump"].params["fixed_side"] = side
     cfg.viewer.width = args.width
     cfg.viewer.height = args.height
     agent_cfg = load_rl_cfg(TASK)

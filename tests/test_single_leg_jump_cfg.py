@@ -94,6 +94,10 @@ def test_task_uses_jump_warm_start_runner():
         is MicroduckActorWarmStartRunner
     )
     assert MicroduckSingleLegJumpRlCfg.experiment_name == "single_leg_jump"
+    assert MicroduckSingleLegJumpRlCfg.actor.distribution_cfg["init_std"] == 0.005
+    assert MicroduckSingleLegJumpRlCfg.algorithm.learning_rate == 5e-5
+    assert MicroduckSingleLegJumpRlCfg.algorithm.entropy_coef == 0.0
+    assert MicroduckSingleLegJumpRlCfg.algorithm.schedule == "fixed"
 
 
 def _runner_stub():

@@ -291,6 +291,10 @@ MicroduckSingleLegJumpRlCfg = deepcopy(MicroduckSingleLegStandRlCfg)
 MicroduckSingleLegJumpRlCfg.experiment_name = "single_leg_jump"
 MicroduckSingleLegJumpRlCfg.run_name = "single_leg_jump"
 MicroduckSingleLegJumpRlCfg.max_iterations = 6_000
+MicroduckSingleLegJumpRlCfg.actor.distribution_cfg["init_std"] = 0.005
+MicroduckSingleLegJumpRlCfg.algorithm.learning_rate = 5e-5
+MicroduckSingleLegJumpRlCfg.algorithm.entropy_coef = 0.0
+MicroduckSingleLegJumpRlCfg.algorithm.schedule = "fixed"
 
 MicroduckSingleLegJumpTransitionRlCfg = deepcopy(MicroduckSingleLegJumpRlCfg)
 MicroduckSingleLegJumpTransitionRlCfg.experiment_name = (

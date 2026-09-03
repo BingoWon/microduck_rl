@@ -26,6 +26,18 @@ class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
 class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
     """Warm-start predecessor actors while preserving native jump resumes."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lock_action_std()
+
+    def _lock_action_std(self):
+        alg = getattr(self, "alg", None)
+        distribution = getattr(getattr(alg, "actor", None), "distribution", None)
+        std_param = getattr(distribution, "std_param", None)
+        if std_param is not None:
+            std_param.data.fill_(0.005)
+            std_param.requires_grad_(False)
+
     def load(self, path, load_cfg=None, strict=True, map_location=None):
         import os
 
@@ -58,12 +70,14 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
             "actor",
         )
         if not warm_start:
-            return super().load(
+            infos = super().load(
                 path,
                 load_cfg=load_cfg,
                 strict=strict,
                 map_location=map_location,
             )
+            self._lock_action_std()
+            return infos
 
         infos = super().load(
             path,
@@ -77,6 +91,7 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
             normalizer = actor.obs_normalizer
             for name, value in (("_mean", 0.0), ("_var", 1.0), ("_std", 1.0)):
                 getattr(normalizer, name)[..., [48, 50]] = value
+        self._lock_action_std()
         self.current_learning_iteration = 0
         self.env.unwrapped.common_step_counter = 0
         return infos

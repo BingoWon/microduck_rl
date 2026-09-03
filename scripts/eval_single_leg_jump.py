@@ -50,6 +50,7 @@ def evaluate(
     cfg.commands["twist"].fixed_side = side
     cfg.commands["twist"].fixed_mode = 1
     cfg.commands["twist"].resampling_time_range = (6.0, 6.0)
+    cfg.events["reset_single_leg_jump"].params["fixed_side"] = side
     agent_cfg = load_rl_cfg(TASK)
     env = RslRlVecEnvWrapper(
         ManagerBasedRlEnv(cfg=cfg, device=device),

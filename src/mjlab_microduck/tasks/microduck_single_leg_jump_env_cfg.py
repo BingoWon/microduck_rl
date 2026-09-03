@@ -83,7 +83,7 @@ def make_microduck_single_leg_jump_env_cfg(
     }
     cfg.rewards["jump_completion"] = RewardTermCfg(
         func=microduck_mdp.single_leg_jump_completion_reward,
-        weight=10.0,
+        weight=20.0,
         params=jump_params,
     )
     cfg.rewards["jump_height"] = RewardTermCfg(
@@ -113,7 +113,7 @@ def make_microduck_single_leg_jump_env_cfg(
     )
     cfg.rewards["jump_recovery_progress"] = RewardTermCfg(
         func=microduck_mdp.single_leg_jump_recovery_progress,
-        weight=1.0,
+        weight=5.0,
         params=jump_params,
     )
     cfg.rewards["action_rate_l2"].weight = -0.01
@@ -124,9 +124,9 @@ def make_microduck_single_leg_jump_env_cfg(
         mode="reset",
         params={
             "state_bank_path": str(RESET_STATE_BANK),
-            "standing_prob": 0.60 if not play else 1.0,
-            "compressed_prob": 0.25 if not play else 0.0,
-            "airborne_prob": 0.15 if not play else 0.0,
+            "standing_prob": 0.35 if not play else 1.0,
+            "compressed_prob": 0.15 if not play else 0.0,
+            "airborne_prob": 0.50 if not play else 0.0,
         },
     )
     cfg.terminations["jump_success"] = TerminationTermCfg(
@@ -166,17 +166,17 @@ def make_microduck_single_leg_jump_env_cfg(
                     {
                         "step": 0,
                         "params": {
-                            "standing_prob": 0.60,
-                            "compressed_prob": 0.25,
-                            "airborne_prob": 0.15,
+                            "standing_prob": 0.35,
+                            "compressed_prob": 0.15,
+                            "airborne_prob": 0.50,
                         },
                     },
                     {
                         "step": 1000 * 24,
                         "params": {
-                            "standing_prob": 0.75,
+                            "standing_prob": 0.60,
                             "compressed_prob": 0.15,
-                            "airborne_prob": 0.10,
+                            "airborne_prob": 0.25,
                         },
                     },
                     {
@@ -203,7 +203,7 @@ def make_microduck_single_leg_jump_env_cfg(
             ("jump_upward_progress", 0.5),
             ("jump_takeoff", 1.0),
             ("jump_landing", 1.0),
-            ("jump_recovery_progress", 1.0),
+            ("jump_recovery_progress", 5.0),
         ):
             cfg.curriculum[f"{reward_name}_weight"] = CurriculumTermCfg(
                 func=microduck_mdp.reward_weight,

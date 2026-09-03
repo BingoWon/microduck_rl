@@ -225,7 +225,7 @@ def test_terminal_rewards_are_banked_until_success():
     cfg = make_microduck_single_leg_jump_env_cfg()
     assert cfg.rewards["strict_single_leg_hold"].params["required_mode"] == "stand"
     assert "failed_episode" not in cfg.rewards
-    assert cfg.rewards["jump_completion"].weight == 10.0
+    assert cfg.rewards["jump_completion"].weight == 20.0
     assert cfg.rewards["jump_height"].weight == 0.0
     assert "jump_success" in cfg.terminations
     assert "jump_failure" in cfg.terminations
@@ -418,9 +418,9 @@ def test_reverse_curriculum_uses_harvested_states_and_anneals_to_standing():
     ) == pytest.approx(1.0)
     stages = cfg.curriculum["jump_reset_mix"].params["param_stages"]
     assert stages[0]["params"] == {
-        "standing_prob": 0.60,
-        "compressed_prob": 0.25,
-        "airborne_prob": 0.15,
+        "standing_prob": 0.35,
+        "compressed_prob": 0.15,
+        "airborne_prob": 0.50,
     }
     assert stages[-1]["params"] == {
         "standing_prob": 1.0,
@@ -514,10 +514,10 @@ def test_discovery_shaping_is_bounded_and_anneals_to_zero():
         "jump_upward_progress": 0.5,
         "jump_takeoff": 1.0,
         "jump_landing": 1.0,
-        "jump_recovery_progress": 1.0,
+        "jump_recovery_progress": 5.0,
     }
-    assert sum(shaping.values()) == 4.0
-    assert cfg.rewards["jump_completion"].weight == 10.0
+    assert sum(shaping.values()) == 8.0
+    assert cfg.rewards["jump_completion"].weight == 20.0
     assert cfg.rewards["jump_height"].weight == 0.0
     assert cfg.rewards["strict_single_leg_hold"].weight == 2.0
     for name, weight in shaping.items():

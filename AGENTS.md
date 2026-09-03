@@ -25,6 +25,59 @@ uv run --with pytest pytest tests/
 A 5-iteration smoke test at 64 envs catches ~95% of config errors for cents.
 Never launch a long run without one.
 
+## Paid GPU training continuity — permanent red lines
+
+- **A paid GPU must always have exactly one useful Trainer.** Preparing code,
+  documentation, evaluators, viewers, or the next candidate happens while the
+  current promotable Trainer keeps running. Do not stop first and then design,
+  patch, test, copy, or decide.
+- Training changes use `ACTIVE -> REPLACEMENT_READY -> SWITCHING -> ACTIVE`.
+  `REPLACEMENT_READY` means the replacement code is implemented and pushed,
+  its source checkpoint and rollback checkpoint are recorded, the command is
+  complete, and its promotion/rejection metrics are fixed before switching.
+- Switch only at a saved checkpoint boundary. Stop the old process group and
+  start the replacement immediately. A zero-Trainer window longer than 15
+  seconds is an operations incident; if replacement startup fails, resume the
+  previous checkpoint rather than leaving the GPU idle.
+- Never run two Trainers on one GPU. Before and after every switch, scan the
+  process tree and treat the launcher plus all descendants as one process
+  group. Evaluators run locally on synchronized checkpoints by default and
+  must not interrupt the remote Trainer.
+- **A PID is not proof of training.** Report training as active only after a
+  `Learning iteration` line advances and GPU work is visible. During the
+  known 8192-env CPU construction period, report "initializing", not
+  "training".
+- Checkpoint gates must be promotable continuations, not disposable
+  benchmarks. Preserve actor, critic, optimizer, iteration, curriculum counter,
+  and normalizers. A winning gate continues directly; do not retrain it from
+  the same starting actor.
+- Always keep the next candidate ready before the current gate ends. An
+  invalid candidate may keep running only until its replacement is ready; do
+  not keep a known-useless policy merely to make GPU utilization non-zero.
+- Use deterministic fixed-side evaluation for promotion. Training-time
+  stochastic completion is diagnostic only. Every evaluator that fixes a
+  command side must also fix `reset_single_leg_jump.fixed_side`; otherwise
+  the result is invalid.
+- For inherited/BC actors, lock or explicitly audit action standard deviation,
+  entropy, learning rate, and optimizer updates. The 2026-09-03 failure
+  expanded v6 std from 0.005 to 0.025–0.031 and erased deterministic hopping.
+- Vast operations require one price monitor and one training monitor. A price
+  change, instance error, SSH failure, stale iteration, NaN, CUDA error, OOM,
+  or checkpoint-sync failure must create an explicit attention record.
+  Monitoring failure must not kill training and must retry rather than exit.
+- Use the current SSH endpoint from `vastai ssh-url`; keep a direct-IP fallback
+  and a proxy-IP fallback because `sshN.vast.ai` DNS can fail locally. Never
+  assume a stale SSH alias still targets the current instance.
+- Do not destroy an instance until all checkpoints, configs, logs, evaluations,
+  and SHA-256 manifests are synchronized and verified locally. A failed host is
+  blacklisted before the offer watcher resumes.
+- Every training-status response starts with iteration/target, steps/s, GPU
+  utilization, VRAM, and `nan_state`, followed by deterministic goal metrics.
+  Do not describe reward growth as task success.
+
+The full incident record and reusable Vast procedure are in
+`docs/2026-09-03-vast-paid-gpu-training-operations.md`.
+
 ## Repo map
 
 - `src/mjlab_microduck/tasks/mdp.py` — ALL custom MDP functions (rewards, events,
@@ -43,6 +96,8 @@ Never launch a long run without one.
   gate + Hub upload. Contract = `docs/policy-manifest.md` in the `microduck` repo; only
   constant-command episodic/perpetual policies are publishable (phase/posture-flag are the set's).
 - `scripts/` — export wrapper, infer, sim2real comparison, wandb helpers.
+- `scripts/single_leg_jump/` — stable single-leg viewer/evaluator/harvester/
+  recorder entry points and training-status tooling.
 - `tests/` — cfg-invariant and mdp-function regression tests (CPU, no GPU needed).
 
 ## Invariants — do not break these

@@ -9,6 +9,8 @@ Canonical reusable tools for the single-leg policy family:
 - `record_jump.py`: fixed-side rollout recording.
 - `eval_stand.py` and `record_stand.py`: stand-policy evaluation and recording.
 - `log_eval_tensorboard.py`: append evaluation results to TensorBoard.
+- `training_status.py`: one JSON snapshot of remote iteration, throughput,
+  GPU, VRAM, power, and NaN state.
 
 Cloud operations and dated evidence remain outside the repository under:
 

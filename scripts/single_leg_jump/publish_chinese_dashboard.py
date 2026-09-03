@@ -95,6 +95,7 @@ METRICS = {
     "Episode_Termination/nan_state": ("07_安全与效率/异常数值终止", 1.0),
     "Perf/total_fps": ("07_安全与效率/每秒环境步数", 1.0),
     "Policy/mean_std": ("07_安全与效率/动作探索标准差", 1.0),
+    "Loss/teacher_anchor": ("07_安全与效率/v6教师动作偏离均方误差", 1.0),
     "Train/mean_reward": ("07_安全与效率/平均总奖励", 1.0),
     "Train/mean_episode_length": ("07_安全与效率/平均回合长度", 1.0),
 }

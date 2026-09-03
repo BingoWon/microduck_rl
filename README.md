@@ -74,6 +74,7 @@ instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 | `Mjlab-Roulade-Flat-MicroDuck` | flat | Forward roll over the head, land back on the feet |
 | `Mjlab-SingleLegStand-Flat-MicroDuck` | flat | Commanded left/right single-leg standing in one symmetric policy |
 | `Mjlab-SingleLegJump-Flat-MicroDuck` | flat | One commanded left/right single-leg jump, same-foot landing, then recovery |
+| `Mjlab-SingleLegJumpTransitions-Flat-MicroDuck` | flat | Continuation task for stand/jump side changes and return-to-stand transactions |
 | `Mjlab-Velocity-Flat-MicroDuck-Rollers` | flat | Roller-skate velocity tracking (passive wheels under the feet) |
 | `Mjlab-Velocity-Swizzle-MicroDuck` | flat | Classic symmetric swizzle skating |
 | `Mjlab-RollerCrouch-Flat-MicroDuck` | flat | Crouch while gliding on rollers |
@@ -104,6 +105,40 @@ poses:
 [1, side, +1]  extend
 [1, side,  0]  recover the same single-leg stand
 ```
+
+Stand commands are held states. A jump button is edge-triggered: the controller
+plays one compression/extension sequence, waits for same-foot landing and
+recovery, then returns to the previously held stand command. The transition
+continuation task trains all same-side and cross-side transactions, including
+`left stand -> right jump -> left stand`; it also includes direct left/right
+stand switches. `internal_phase` is therefore a controller signal, not a fifth
+user pose.
+
+Train the core jump first, then warm-start the transition continuation from its
+actor:
+
+```bash
+uv run train Mjlab-SingleLegJump-Flat-MicroDuck \
+    --env.scene.num-envs 64 --agent.max_iterations 5
+
+SINGLE_LEG_JUMP_ACTOR_WARM_START=actor \
+uv run train Mjlab-SingleLegJumpTransitions-Flat-MicroDuck \
+    --agent.load-checkpoint model_<iteration>.pt --agent.resume True \
+    --env.scene.num-envs 64 --agent.max_iterations 5
+
+uv run scripts/eval_single_leg_jump_transitions.py model_<iteration>.pt
+```
+
+`SINGLE_LEG_JUMP_ACTOR_WARM_START=stand` is only for initializing the jump task
+from a stand checkpoint; it resets the new jump command inputs. Omit the
+variable when resuming a native jump/transition checkpoint so critic,
+optimizer, iteration, and curricula are restored.
+
+Training is deliberately unfiltered. The deployed jump policy must run with
+the runtime leg action low-pass disabled; the current `0.7` leg filter changes
+the learned compression/extension timing. Matching that filter in a separate
+training/runtime transfer experiment is the only acceptable alternative.
+
 The servos are simulated with the same BAM M6 XL330 model the policies are
 trained against (voltage control + load-dependent friction, via
 `bam.mujoco.MujocoController`); `--vin` / `--vin-drop-gain` / `--kp-fw` pin the

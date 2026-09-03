@@ -13,8 +13,11 @@ from mjlab_microduck.tasks import (
 from mjlab_microduck.tasks.microduck_single_leg_jump_env_cfg import (
     EPISODE_LENGTH_S,
     RESET_STATE_BANK,
+    TRANSITION_EPISODE_LENGTH_S,
     MicroduckSingleLegJumpRlCfg,
+    MicroduckSingleLegJumpTransitionRlCfg,
     make_microduck_single_leg_jump_env_cfg,
+    make_microduck_single_leg_jump_transition_env_cfg,
 )
 
 
@@ -37,6 +40,37 @@ def test_four_semantic_commands_share_one_actor():
     assert command.ranges.lin_vel_y == (-1.0, 1.0)
     assert command.fixed_mode == -1
     assert MicroduckSingleLegJumpRlCfg.algorithm.symmetry_cfg is not None
+
+
+def test_transition_task_trains_return_to_resume_side():
+    cfg = make_microduck_single_leg_jump_transition_env_cfg()
+    command = cfg.commands["twist"]
+    assert cfg.episode_length_s == TRANSITION_EPISODE_LENGTH_S == 10.0
+    assert isinstance(
+        command, microduck_mdp.SingleLegJumpTransitionCommandCfg
+    )
+    assert command.transaction_jump_prob == 0.75
+    assert command.cross_side_prob == 0.5
+    assert command.initial_hold_s == 1.5
+    assert command.recovery_s == 1.5
+    assert cfg.events["reset_single_leg_jump"].params == {
+        **make_microduck_single_leg_jump_env_cfg().events[
+            "reset_single_leg_jump"
+        ].params,
+        "standing_prob": 1.0,
+        "compressed_prob": 0.0,
+        "airborne_prob": 0.0,
+        "fixed_side": 0,
+    }
+    assert "jump_reset_mix" not in cfg.curriculum
+    assert "jump_success" not in cfg.terminations
+    assert "transaction_success" in cfg.terminations
+    assert cfg.rewards["return_completion"].weight == 5.0
+    assert (
+        MicroduckSingleLegJumpTransitionRlCfg.experiment_name
+        == "single_leg_jump_transitions"
+    )
+    assert "Mjlab-SingleLegJumpTransitions-Flat-MicroDuck" in list_tasks()
 
 
 def test_play_mode_can_be_fixed(monkeypatch):
@@ -112,7 +146,7 @@ def test_explicit_stand_warm_start_resets_new_command_inputs(
 ):
     checkpoint = tmp_path / "stand.pt"
     torch.save({"infos": {}}, checkpoint)
-    monkeypatch.setenv("SINGLE_LEG_JUMP_ACTOR_WARM_START", "1")
+    monkeypatch.setenv("SINGLE_LEG_JUMP_ACTOR_WARM_START", "stand")
     monkeypatch.setattr(
         MicroduckOnPolicyRunner,
         "load",
@@ -141,6 +175,37 @@ def test_explicit_stand_warm_start_resets_new_command_inputs(
     )
     assert torch.equal(
         runner.alg.actor.obs_normalizer._std[[48, 50]], torch.ones(2)
+    )
+
+
+def test_actor_warm_start_preserves_jump_command_inputs(
+    monkeypatch, tmp_path
+):
+    checkpoint = tmp_path / "jump.pt"
+    torch.save({"infos": {}}, checkpoint)
+    monkeypatch.setenv("SINGLE_LEG_JUMP_ACTOR_WARM_START", "actor")
+    monkeypatch.setattr(
+        MicroduckOnPolicyRunner,
+        "load",
+        lambda self, *args, **kwargs: {},
+    )
+    runner = _runner_stub()
+    runner.alg = SimpleNamespace(
+        actor=SimpleNamespace(
+            mlp=[SimpleNamespace(weight=torch.ones(2, 61))],
+            obs_normalizer=SimpleNamespace(
+                _mean=torch.ones(61),
+                _var=torch.full((61,), 2.0),
+                _std=torch.full((61,), 3.0),
+            ),
+        )
+    )
+    runner.load(checkpoint)
+    assert torch.equal(
+        runner.alg.actor.mlp[0].weight[:, [48, 50]], torch.ones(2, 2)
+    )
+    assert torch.equal(
+        runner.alg.actor.obs_normalizer._mean[[48, 50]], torch.ones(2)
     )
 
 
@@ -206,6 +271,108 @@ def test_short_contact_flicker_is_not_a_landing():
     assert not bool(takeoff[0])
     assert not bool(landing[0])
     assert not bool(failed[0])
+
+
+def test_full_takeoff_landing_recovery_transition(monkeypatch):
+    class Scene(dict):
+        pass
+
+    command = torch.tensor([[1.0, -1.0, 0.0]])
+    term = SimpleNamespace(is_jump=torch.tensor([True]))
+    command_manager = SimpleNamespace(
+        get_command=lambda name: command,
+        get_term=lambda name: term,
+    )
+    data = SimpleNamespace(
+        root_link_pos_w=torch.tensor([[0.0, 0.0, 0.12]]),
+        root_link_lin_vel_w=torch.zeros(1, 3),
+    )
+    scene = Scene(robot=SimpleNamespace(data=data))
+    scene.terrain = SimpleNamespace(env_origins=torch.zeros(1, 3))
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        step_dt=0.02,
+        common_step_counter=0,
+        episode_length_buf=torch.zeros(1, dtype=torch.long),
+        command_manager=command_manager,
+        scene=scene,
+        _test_contacts=torch.tensor([[1.0, 0.0]]),
+        _test_recovery_valid=torch.tensor([False]),
+    )
+    monkeypatch.setattr(
+        microduck_mdp,
+        "_single_leg_command_state",
+        lambda *args: (
+            torch.tensor([-1.0]),
+            torch.tensor([0]),
+            torch.tensor([1]),
+            torch.tensor([1.0]),
+        ),
+    )
+    monkeypatch.setattr(
+        microduck_mdp,
+        "_single_leg_contacts",
+        lambda test_env, sensor_name: test_env._test_contacts,
+    )
+    monkeypatch.setattr(
+        microduck_mdp,
+        "any_contact_cost",
+        lambda *args: torch.zeros(1),
+    )
+    monkeypatch.setattr(
+        microduck_mdp,
+        "single_leg_success_state",
+        lambda test_env, **kwargs: test_env._test_recovery_valid.float(),
+    )
+    params = {
+        "command_name": "twist",
+        "sensor_name": "feet",
+        "nonfoot_sensor_name": "nonfoot",
+        "asset_cfg": SimpleNamespace(name="robot"),
+    }
+
+    microduck_mdp.single_leg_jump_success(env, **params)
+    assert env._slj_initial_grounded.tolist() == [True]
+
+    env.common_step_counter = 1
+    command[:, 2] = -1.0
+    microduck_mdp.single_leg_jump_success(env, **params)
+    assert env._slj_attempt_started.tolist() == [True]
+
+    env.common_step_counter = 2
+    command[:, 2] = 1.0
+    data.root_link_pos_w[:, 2] = 0.115
+    data.root_link_lin_vel_w[:, 2] = 0.05
+    microduck_mdp.single_leg_jump_success(env, **params)
+
+    env.common_step_counter = 3
+    env._test_contacts[:] = torch.tensor([[0.0, 0.0]])
+    data.root_link_pos_w[:, 2] = 0.124
+    assert not bool(microduck_mdp.single_leg_jump_success(env, **params)[0])
+    assert env._slj_takeoff_event.tolist() == [True]
+    assert env._slj_took_off.tolist() == [True]
+
+    env.common_step_counter = 4
+    command[:, 2] = 0.0
+    env._test_contacts[:] = torch.tensor([[1.0, 0.0]])
+    env._test_recovery_valid[:] = True
+    data.root_link_pos_w[:, 2] = 0.123
+    data.root_link_lin_vel_w[:, 2] = -0.02
+    assert not bool(microduck_mdp.single_leg_jump_success(env, **params)[0])
+    assert env._slj_landing_event.tolist() == [True]
+    assert env._slj_landed.tolist() == [True]
+
+    for step in range(5, 29):
+        env.common_step_counter = step
+        success = microduck_mdp.single_leg_jump_success(env, **params)
+    assert bool(success[0])
+    assert env._slj_completion_event.tolist() == [True]
+    assert not env._slj_failed.any()
+
+    env.common_step_counter = 29
+    microduck_mdp.single_leg_jump_success(env, **params)
+    assert env._slj_completion_event.tolist() == [False]
 
 
 def test_wrong_contact_fails_before_takeoff_once_single_leg_is_established():
@@ -385,6 +552,7 @@ def test_terminal_reward_is_exact_and_failed_height_bank_is_discarded(monkeypatc
     env = SimpleNamespace(
         step_dt=0.02,
         _slj_completed=torch.tensor([True, False]),
+        _slj_completion_event=torch.tensor([True, False]),
         _slj_peak_height_gain=torch.tensor([0.006, 0.010]),
     )
     params = {
@@ -410,6 +578,7 @@ def test_partial_reset_clears_jump_latches():
     env._slj_failed[:] = True
     env._slj_took_off[:] = True
     env._slj_landed[:] = True
+    env._slj_completion_event[:] = True
     env._slj_peak_height_gain[:] = 0.01
     microduck_mdp.reset_single_leg_jump_state(
         env, torch.tensor([1]), state_bank_path=None
@@ -418,6 +587,7 @@ def test_partial_reset_clears_jump_latches():
     assert env._slj_failed.tolist() == [True, False, True]
     assert env._slj_took_off.tolist() == [True, False, True]
     assert env._slj_landed.tolist() == [True, False, True]
+    assert env._slj_completion_event.tolist() == [True, False, True]
     assert env._slj_peak_height_gain.tolist() == pytest.approx([0.01, 0.0, 0.01])
 
 
@@ -456,6 +626,63 @@ def test_banked_reset_aligns_command_side_mode_and_phase(monkeypatch):
     assert term._alpha.tolist() == [1.0, 1.0, 1.0]
     assert term._is_jump.tolist() == [False, True, True]
     assert term._elapsed.tolist() == pytest.approx([0.0, 1.72, 1.84])
+
+
+def test_transition_command_runs_target_then_returns_resume(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp.SingleLegStandCommand,
+        "compute",
+        lambda term, dt: None,
+    )
+    term = object.__new__(microduck_mdp.SingleLegJumpTransitionCommand)
+    term.cfg = SimpleNamespace(
+        initial_hold_s=1.5,
+        prepare_s=1.5,
+        crouch_s=0.22,
+        extend_s=0.12,
+        recovery_s=1.5,
+    )
+    term._elapsed = torch.zeros(1)
+    term._resume_side = torch.tensor([-1.0])
+    term._target_side = torch.tensor([1.0])
+    term._transaction_is_jump = torch.tensor([True])
+    term._is_jump = torch.tensor([False])
+    term._returning = torch.tensor([False])
+    term._alpha = torch.ones(1)
+    term.vel_command_b = torch.zeros(1, 3)
+    term.vel_command_b[:, 1] = -1.0
+
+    cases = (
+        (0.0, [0.0, -1.0, 0.0], False),
+        (1.5, [1.0, 1.0, 0.0], False),
+        (3.0, [1.0, 1.0, -1.0], False),
+        (3.23, [1.0, 1.0, 1.0], False),
+        (4.84, [0.0, -1.0, 0.0], True),
+    )
+    for elapsed, expected, returning in cases:
+        term._elapsed[:] = elapsed
+        term.compute(0.0)
+        assert term.vel_command_b[0].tolist() == pytest.approx(expected)
+        assert bool(term.returning[0]) is returning
+
+
+def test_completion_reward_is_an_event_not_a_post_success_jackpot(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp, "_update_single_leg_jump", lambda *args, **kwargs: None
+    )
+    env = SimpleNamespace(
+        step_dt=0.02,
+        _slj_completed=torch.tensor([True]),
+        _slj_completion_event=torch.tensor([False]),
+    )
+    reward = microduck_mdp.single_leg_jump_completion_reward(
+        env,
+        command_name="twist",
+        sensor_name="feet",
+        nonfoot_sensor_name="nonfoot",
+        asset_cfg=None,
+    )
+    assert reward.tolist() == [0.0]
 
 
 def test_training_metrics_are_split_by_support_side():
@@ -533,5 +760,9 @@ def test_training_metrics_return_per_environment_values(monkeypatch):
 def test_jump_task_is_documented_in_readme():
     readme = (RESET_STATE_BANK.parents[4] / "README.md").read_text()
     assert "Mjlab-SingleLegJump-Flat-MicroDuck" in readme
+    assert "Mjlab-SingleLegJumpTransitions-Flat-MicroDuck" in readme
     assert "[1, side, -1]" in readme
     assert "[1, side, +1]" in readme
+    assert "left stand -> right jump -> left stand" in readme
+    assert "SINGLE_LEG_JUMP_ACTOR_WARM_START=actor" in readme
+    assert "runtime leg action low-pass disabled" in readme

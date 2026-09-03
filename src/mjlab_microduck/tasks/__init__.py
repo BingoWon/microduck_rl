@@ -28,6 +28,7 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
 
     def load(self, path, load_cfg=None, strict=True, map_location=None):
         import os
+
         import torch
 
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
@@ -35,11 +36,27 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
             (checkpoint.get("infos") or {}).get("hop_command_pretrained", False)
         )
         explicit = os.environ.get("SINGLE_LEG_JUMP_ACTOR_WARM_START", "").lower()
-        if explicit not in ("", "0", "false", "no", "1", "true", "yes"):
+        if explicit not in (
+            "",
+            "0",
+            "false",
+            "no",
+            "1",
+            "true",
+            "yes",
+            "stand",
+            "actor",
+        ):
             raise ValueError(
-                "SINGLE_LEG_JUMP_ACTOR_WARM_START must be 0/1, false/true, or no/yes"
+                "SINGLE_LEG_JUMP_ACTOR_WARM_START must be stand, actor, or a boolean"
             )
-        warm_start = jump_pretrained or explicit in ("1", "true", "yes")
+        warm_start = jump_pretrained or explicit in (
+            "1",
+            "true",
+            "yes",
+            "stand",
+            "actor",
+        )
         if not warm_start:
             return super().load(
                 path,
@@ -54,7 +71,7 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
             strict=strict,
             map_location=map_location,
         )
-        if not jump_pretrained:
+        if not jump_pretrained and explicit != "actor":
             actor = self.alg.actor
             actor.mlp[0].weight.data[:, [48, 50]] = 0.0
             normalizer = actor.obs_normalizer
@@ -124,7 +141,9 @@ from .microduck_single_leg_stand_env_cfg import (
 )
 from .microduck_single_leg_jump_env_cfg import (
     make_microduck_single_leg_jump_env_cfg,
+    make_microduck_single_leg_jump_transition_env_cfg,
     MicroduckSingleLegJumpRlCfg,
+    MicroduckSingleLegJumpTransitionRlCfg,
 )
 from .backlash import make_backlash_variant
 
@@ -306,6 +325,14 @@ register_mjlab_task(
     env_cfg=make_microduck_single_leg_jump_env_cfg(),
     play_env_cfg=make_microduck_single_leg_jump_env_cfg(play=True),
     rl_cfg=MicroduckSingleLegJumpRlCfg,
+    runner_cls=MicroduckActorWarmStartRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-SingleLegJumpTransitions-Flat-MicroDuck",
+    env_cfg=make_microduck_single_leg_jump_transition_env_cfg(),
+    play_env_cfg=make_microduck_single_leg_jump_transition_env_cfg(play=True),
+    rl_cfg=MicroduckSingleLegJumpTransitionRlCfg,
     runner_cls=MicroduckActorWarmStartRunner,
 )
 

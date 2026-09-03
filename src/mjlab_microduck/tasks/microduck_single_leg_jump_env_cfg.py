@@ -12,7 +12,6 @@ from mjlab.managers import (
     RewardTermCfg,
     TerminationTermCfg,
 )
-from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_single_leg_stand_env_cfg import (
@@ -26,6 +25,7 @@ from mjlab_microduck.tasks.microduck_single_leg_stand_env_cfg import (
 
 
 EPISODE_LENGTH_S = 6.0
+TRANSITION_EPISODE_LENGTH_S = 10.0
 RESET_STATE_BANK = (
     Path(__file__).resolve().parent / "data" / "single_leg_jump_reset_states.json"
 )
@@ -231,7 +231,70 @@ def make_microduck_single_leg_jump_env_cfg(
     return cfg
 
 
+def make_microduck_single_leg_jump_transition_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Continuation task for stand/jump transactions with a return side."""
+    cfg = make_microduck_single_leg_jump_env_cfg(play=play)
+    cfg.episode_length_s = TRANSITION_EPISODE_LENGTH_S
+    command_kwargs = vars(cfg.commands[COMMAND_NAME]).copy()
+    command_kwargs["resampling_time_range"] = (
+        TRANSITION_EPISODE_LENGTH_S,
+        TRANSITION_EPISODE_LENGTH_S,
+    )
+    cfg.commands[COMMAND_NAME] = (
+        microduck_mdp.SingleLegJumpTransitionCommandCfg(
+            **command_kwargs,
+            transaction_jump_prob=0.75,
+            cross_side_prob=0.5,
+            initial_hold_s=1.5,
+            recovery_s=1.5,
+        )
+    )
+    cfg.events["reset_single_leg_jump"].params.update(
+        standing_prob=1.0,
+        compressed_prob=0.0,
+        airborne_prob=0.0,
+        fixed_side=0,
+    )
+    cfg.curriculum.pop("jump_reset_mix", None)
+    cfg.terminations.pop("jump_success", None)
+    return_params = {
+        "command_name": COMMAND_NAME,
+        "sensor_name": FEET_SENSOR,
+        "nonfoot_sensor_name": NONFOOT_SENSOR,
+        "asset_cfg": FEET_CFG,
+        "min_takeoff_velocity": 0.02,
+        "min_height_gain": 0.003,
+        "recovery_s": 0.5,
+        "return_hold_s": 1.0,
+    }
+    cfg.rewards["return_completion"] = RewardTermCfg(
+        func=microduck_mdp.single_leg_jump_return_reward,
+        weight=5.0,
+        params=return_params,
+    )
+    cfg.metrics["transaction_success"] = MetricsTermCfg(
+        func=microduck_mdp.single_leg_jump_return_success,
+        reduce="last",
+        params=return_params,
+    )
+    cfg.terminations["transaction_success"] = TerminationTermCfg(
+        func=microduck_mdp.single_leg_jump_return_success,
+        time_out=False,
+        params=return_params,
+    )
+    return cfg
+
+
 MicroduckSingleLegJumpRlCfg = deepcopy(MicroduckSingleLegStandRlCfg)
 MicroduckSingleLegJumpRlCfg.experiment_name = "single_leg_jump"
 MicroduckSingleLegJumpRlCfg.run_name = "single_leg_jump"
 MicroduckSingleLegJumpRlCfg.max_iterations = 6_000
+
+MicroduckSingleLegJumpTransitionRlCfg = deepcopy(MicroduckSingleLegJumpRlCfg)
+MicroduckSingleLegJumpTransitionRlCfg.experiment_name = (
+    "single_leg_jump_transitions"
+)
+MicroduckSingleLegJumpTransitionRlCfg.run_name = "single_leg_jump_transitions"
+MicroduckSingleLegJumpTransitionRlCfg.max_iterations = 3_000

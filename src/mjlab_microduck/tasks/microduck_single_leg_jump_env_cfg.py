@@ -4,10 +4,15 @@ import os
 from copy import deepcopy
 
 from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.managers import EventTermCfg, RewardTermCfg, TerminationTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_single_leg_stand_env_cfg import (
     COMMAND_NAME,
+    FEET_CFG,
+    FEET_SENSOR,
+    NONFOOT_SENSOR,
     MicroduckSingleLegStandRlCfg,
     make_microduck_single_leg_stand_strict_env_cfg,
 )
@@ -46,6 +51,43 @@ def make_microduck_single_leg_jump_env_cfg(
         prepare_s=1.5,
         crouch_s=0.22,
         extend_s=0.12,
+    )
+
+    cfg.rewards["strict_single_leg_hold"].params["required_mode"] = "stand"
+    cfg.rewards.pop("failed_episode", None)
+    jump_params = {
+        "command_name": COMMAND_NAME,
+        "sensor_name": FEET_SENSOR,
+        "nonfoot_sensor_name": NONFOOT_SENSOR,
+        "asset_cfg": FEET_CFG,
+        "min_takeoff_velocity": 0.02,
+        "min_height_gain": 0.003,
+        "recovery_s": 0.5,
+    }
+    cfg.rewards["jump_completion"] = RewardTermCfg(
+        func=microduck_mdp.single_leg_jump_completion_reward,
+        weight=10.0,
+        params=jump_params,
+    )
+    cfg.rewards["jump_height"] = RewardTermCfg(
+        func=microduck_mdp.single_leg_jump_banked_height_reward,
+        weight=1.0,
+        params={**jump_params, "target_height_gain": 0.01},
+    )
+
+    cfg.events["reset_single_leg_jump"] = EventTermCfg(
+        func=microduck_mdp.reset_single_leg_jump_state,
+        mode="reset",
+    )
+    cfg.terminations["jump_success"] = TerminationTermCfg(
+        func=microduck_mdp.single_leg_jump_success,
+        time_out=False,
+        params=jump_params,
+    )
+    cfg.terminations["jump_failure"] = TerminationTermCfg(
+        func=microduck_mdp.single_leg_jump_failure,
+        time_out=False,
+        params=jump_params,
     )
     return cfg
 

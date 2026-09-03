@@ -15,6 +15,8 @@ Canonical reusable tools for the single-leg policy family:
   TensorBoard event file while checkpoints use their separate atomic sync.
 - `auto_eval_checkpoints.py`: evaluate synchronized model250/500/750/1000
   checkpoints locally and publish deployment-style metrics into TensorBoard.
+- `publish_chinese_dashboard.py`: rewrite the raw event stream into a compact,
+  Chinese-only decision dashboard.
 
 Cloud operations and dated evidence remain outside the repository under:
 

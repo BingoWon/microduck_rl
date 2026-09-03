@@ -22,6 +22,7 @@ from mjlab_microduck.tasks.microduck_single_leg_stand_env_cfg import (
     MicroduckSingleLegStandRlCfg,
     make_microduck_single_leg_stand_strict_env_cfg,
 )
+from mjlab_microduck.tasks.teacher_anchor import PpoWithTeacherAnchorCfg
 
 
 EPISODE_LENGTH_S = 6.0
@@ -291,7 +292,17 @@ MicroduckSingleLegJumpRlCfg = deepcopy(MicroduckSingleLegStandRlCfg)
 MicroduckSingleLegJumpRlCfg.experiment_name = "single_leg_jump"
 MicroduckSingleLegJumpRlCfg.run_name = "single_leg_jump"
 MicroduckSingleLegJumpRlCfg.max_iterations = 6_000
+MicroduckSingleLegJumpRlCfg.actor.class_name = (
+    "mjlab_microduck.tasks.teacher_anchor.TeacherAnchoredMLPModel"
+)
 MicroduckSingleLegJumpRlCfg.actor.distribution_cfg["init_std"] = 0.005
+MicroduckSingleLegJumpRlCfg.algorithm = PpoWithTeacherAnchorCfg(
+    **vars(MicroduckSingleLegJumpRlCfg.algorithm),
+    teacher_anchor_coeff=0.5,
+)
+MicroduckSingleLegJumpRlCfg.algorithm.class_name = (
+    "mjlab_microduck.tasks.teacher_anchor.TeacherAnchoredPPO"
+)
 MicroduckSingleLegJumpRlCfg.algorithm.learning_rate = 5e-5
 MicroduckSingleLegJumpRlCfg.algorithm.entropy_coef = 0.0
 MicroduckSingleLegJumpRlCfg.algorithm.schedule = "fixed"

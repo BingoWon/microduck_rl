@@ -1,9 +1,11 @@
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 import torch
 from mjlab.tasks.registry import list_tasks, load_runner_cls
+from tensordict import TensorDict
 
 from mjlab_microduck.tasks import (
     MicroduckActorWarmStartRunner,
@@ -19,6 +21,7 @@ from mjlab_microduck.tasks.microduck_single_leg_jump_env_cfg import (
     make_microduck_single_leg_jump_env_cfg,
     make_microduck_single_leg_jump_transition_env_cfg,
 )
+from mjlab_microduck.tasks.teacher_anchor import TeacherAnchoredMLPModel
 
 
 def test_task_skeleton_keeps_shared_contract():
@@ -95,9 +98,42 @@ def test_task_uses_jump_warm_start_runner():
     )
     assert MicroduckSingleLegJumpRlCfg.experiment_name == "single_leg_jump"
     assert MicroduckSingleLegJumpRlCfg.actor.distribution_cfg["init_std"] == 0.005
+    assert MicroduckSingleLegJumpRlCfg.algorithm.teacher_anchor_coeff == 0.5
+    assert MicroduckSingleLegJumpRlCfg.algorithm.teacher_anchor_phase0_only
     assert MicroduckSingleLegJumpRlCfg.algorithm.learning_rate == 5e-5
     assert MicroduckSingleLegJumpRlCfg.algorithm.entropy_coef == 0.0
     assert MicroduckSingleLegJumpRlCfg.algorithm.schedule == "fixed"
+
+
+def test_teacher_anchor_adds_gradient_only_outside_dynamic_phases():
+    obs = TensorDict({"actor": torch.zeros(4, 61)}, batch_size=[4])
+    model = TeacherAnchoredMLPModel(
+        obs,
+        {"actor": ["actor"]},
+        "actor",
+        14,
+        hidden_dims=(8,),
+        distribution_cfg={
+            "class_name": "GaussianDistribution",
+            "init_std": 0.005,
+            "std_type": "scalar",
+        },
+    )
+    teacher = deepcopy(model)
+    model.set_teacher(teacher, coeff=0.5, phase0_only=True)
+    model._anchor_losses = []
+    with torch.no_grad():
+        model.mlp[-1].bias.add_(0.1)
+
+    model(obs, stochastic_output=True)
+    (model.get_output_log_prob(torch.zeros(4, 14)).sum() * 0.0).backward()
+    assert model.mlp[-1].bias.grad.abs().sum() > 0
+
+    model.zero_grad()
+    obs["actor"][:, 50] = 1.0
+    model(obs, stochastic_output=True)
+    (model.get_output_log_prob(torch.zeros(4, 14)).sum() * 0.0).backward()
+    assert model.mlp[-1].bias.grad.abs().sum() == 0
 
 
 def _runner_stub():

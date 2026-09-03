@@ -38,6 +38,15 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
             std_param.data.fill_(0.005)
             std_param.requires_grad_(False)
 
+    def _ensure_teacher_anchor(self):
+        set_teacher = getattr(
+            getattr(self, "alg", None),
+            "set_teacher_from_actor",
+            None,
+        )
+        if set_teacher is not None:
+            set_teacher()
+
     def load(self, path, load_cfg=None, strict=True, map_location=None):
         import os
 
@@ -77,6 +86,7 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
                 map_location=map_location,
             )
             self._lock_action_std()
+            self._ensure_teacher_anchor()
             return infos
 
         infos = super().load(
@@ -92,6 +102,7 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
             for name, value in (("_mean", 0.0), ("_var", 1.0), ("_std", 1.0)):
                 getattr(normalizer, name)[..., [48, 50]] = value
         self._lock_action_std()
+        self._ensure_teacher_anchor()
         self.current_learning_iteration = 0
         self.env.unwrapped.common_step_counter = 0
         return infos

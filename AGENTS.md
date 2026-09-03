@@ -222,8 +222,12 @@ The full incident record and reusable Vast procedure are in
   Never cut off an action that still has physical momentum and could succeed
   on a later simulation step. Hard failure requires an observed unsafe or
   irreversible post-takeoff/landing state, NaN, terrain exit, or the ordinary
-  episode time limit. Diagnostic viewers must remove behavior and fall-height
-  terminations so the complete attempted motion remains visible.
+  episode time limit.
+- The default viewer must mirror the real training/deployment maneuver cadence:
+  preserve the task's episode length and success/failure terminations so a
+  one-shot action visibly completes and resets. Infinite episodes and removed
+  terminations are allowed only behind an explicit `--diagnostic` flag; never
+  use diagnostic timing for the viewer presented as actual model behavior.
 - **No jackpots:** any "reach X" reward must be rate-limited or slewed.
   Arriving early at a goal state that then pays per-step is a jackpot that
   buys arbitrary violence. For commanded transitions, track a slewed internal

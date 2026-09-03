@@ -25,7 +25,7 @@ from mjlab_microduck.tasks.microduck_single_leg_stand_env_cfg import (
 from mjlab_microduck.tasks.teacher_anchor import PpoWithTeacherAnchorCfg
 
 
-EPISODE_LENGTH_S = 6.0
+EPISODE_LENGTH_S = 3.0
 TRANSITION_EPISODE_LENGTH_S = 10.0
 RESET_STATE_BANK = (
     Path(__file__).resolve().parent / "data" / "single_leg_jump_reset_states.json"
@@ -59,7 +59,7 @@ def make_microduck_single_leg_jump_env_cfg(
         **command_kwargs,
         jump_prob=0.75,
         fixed_mode=_fixed_play_mode() if play else -1,
-        prepare_s=1.5,
+        prepare_s=0.8,
         crouch_s=0.22,
         extend_s=0.12,
     )

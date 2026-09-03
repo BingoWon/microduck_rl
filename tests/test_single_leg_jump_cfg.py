@@ -27,10 +27,10 @@ from mjlab_microduck.tasks.teacher_anchor import TeacherAnchoredMLPModel
 def test_task_skeleton_keeps_shared_contract():
     cfg = make_microduck_single_leg_jump_env_cfg()
     command = cfg.commands["twist"]
-    assert cfg.episode_length_s == EPISODE_LENGTH_S == 6.0
+    assert cfg.episode_length_s == EPISODE_LENGTH_S == 3.0
     assert isinstance(command, microduck_mdp.SingleLegJumpCommandCfg)
     assert command.jump_prob == 0.75
-    assert command.prepare_s == 1.5
+    assert command.prepare_s == 0.8
     assert command.crouch_s == 0.22
     assert command.extend_s == 0.12
     assert cfg.observations["actor"].terms["head_command"].params["dim"] == 4

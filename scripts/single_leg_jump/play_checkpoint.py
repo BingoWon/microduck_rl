@@ -19,18 +19,20 @@ def main() -> None:
     parser.add_argument("checkpoint")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--diagnostic", action="store_true")
     args = parser.parse_args()
 
     env_cfg = load_env_cfg(TASK, play=True)
     env_cfg.scene.num_envs = 1
-    env_cfg.episode_length_s = 3600.0
     command_cfg = env_cfg.commands["twist"]
     command_cfg.fixed_side = -1
     command_cfg.fixed_mode = 1
-    command_cfg.resampling_time_range = (3600.0, 3600.0)
     env_cfg.events["reset_single_leg_jump"].params["fixed_side"] = -1
-    for name in ("jump_success", "jump_failure", "root_too_low", "fell_over"):
-        env_cfg.terminations.pop(name, None)
+    if args.diagnostic:
+        env_cfg.episode_length_s = 3600.0
+        command_cfg.resampling_time_range = (3600.0, 3600.0)
+        for name in ("jump_success", "jump_failure", "root_too_low", "fell_over"):
+            env_cfg.terminations.pop(name, None)
 
     agent_cfg = load_rl_cfg(TASK)
     env = RslRlVecEnvWrapper(

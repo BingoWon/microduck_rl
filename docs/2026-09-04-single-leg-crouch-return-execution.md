@@ -419,7 +419,7 @@ GPU: RTX 4090
 训练代码 rollback：
 
 ```text
-git commit: 在本执行文档与实现提交完成后填写
+implementation commit: `2eb4c17`
 ```
 
 actor rollback：

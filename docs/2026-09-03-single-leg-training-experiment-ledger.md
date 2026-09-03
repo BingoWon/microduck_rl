@@ -686,7 +686,8 @@ SHA-256:
 
 - actor/normalizer：继承；
 - critic/optimizer/iteration：重新开始；
-- 当前代码基线 commit：`1861ca0893b9ed77317757921b6085913913a5f1`；
+- 规划基线 commit：`1861ca0893b9ed77317757921b6085913913a5f1`；
+- 实现 commit：`2eb4c17`；
 - 当前旧 jump 实验 dirty patch 不得进入新任务提交。
 
 #### Contract

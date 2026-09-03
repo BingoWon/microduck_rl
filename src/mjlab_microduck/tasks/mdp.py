@@ -1,7 +1,9 @@
 """MDP functions for microduck tasks"""
 
+import json
 import math
 from dataclasses import dataclass as _dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -5940,6 +5942,24 @@ class SingleLegJumpCommand(SingleLegStandCommand):
                 torch.rand(len(env_ids), device=self.device) < self._jump_prob
             )
         self._elapsed[env_ids] = 0.0
+        reset_kind = getattr(self._env, "_slj_reset_kind", None)
+        reset_side = getattr(self._env, "_slj_reset_side", None)
+        if reset_kind is not None and reset_side is not None:
+            kind = reset_kind[env_ids]
+            special = kind > 0
+            special_ids = env_ids[special]
+            if len(special_ids) > 0:
+                self._is_jump[special_ids] = True
+                self.vel_command_b[special_ids, 1] = reset_side[special_ids]
+                self._alpha[special_ids] = 1.0
+                compressed = kind[special] == 1
+                elapsed = torch.full(
+                    (len(special_ids),),
+                    self.cfg.prepare_s + self.cfg.crouch_s + self.cfg.extend_s,
+                    device=self.device,
+                )
+                elapsed[compressed] = self.cfg.prepare_s + self.cfg.crouch_s
+                self._elapsed[special_ids] = elapsed
 
     def compute(self, dt: float) -> None:
         super().compute(dt)
@@ -6383,9 +6403,17 @@ def single_leg_jump_transition_flags(
 def reset_single_leg_jump_state(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
+    state_bank_path: str | None = None,
+    standing_prob: float = 1.0,
+    compressed_prob: float = 0.0,
+    airborne_prob: float = 0.0,
+    landing_prob: float = 0.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
-    """Reset every one-shot jump latch without reading stale derived state."""
-    if env_ids is None or len(env_ids) == 0:
+    """Reset latches and optionally apply harvested reverse-curriculum states."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    if len(env_ids) == 0:
         return
     env_ids = env_ids.to(env.device, dtype=torch.long)
     n = env.num_envs
@@ -6414,6 +6442,8 @@ def reset_single_leg_jump_state(
             n, dtype=torch.bool, device=env.device
         )
         env._slj_previous_command_phase = torch.zeros(n, device=env.device)
+        env._slj_reset_kind = torch.zeros(n, dtype=torch.long, device=env.device)
+        env._slj_reset_side = torch.zeros(n, device=env.device)
         env._slj_last_update = -1
     env._slj_stage[env_ids] = _SLJ_PREPARE
     env._slj_initial_grounded[env_ids] = False
@@ -6427,7 +6457,110 @@ def reset_single_leg_jump_state(
     env._slj_takeoff_event[env_ids] = False
     env._slj_landing_event[env_ids] = False
     env._slj_previous_command_phase[env_ids] = 0.0
+    env._slj_reset_kind[env_ids] = 0
+    env._slj_reset_side[env_ids] = 0.0
     env._slj_last_update = -1
+
+    probabilities = (
+        standing_prob,
+        compressed_prob,
+        airborne_prob,
+        landing_prob,
+    )
+    if any(p < 0.0 for p in probabilities):
+        raise ValueError("single-leg jump reset probabilities must be non-negative")
+    total = sum(probabilities)
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError("single-leg jump reset probabilities must sum to 1")
+    if state_bank_path is None or total == standing_prob:
+        return
+
+    cache_key = str(Path(state_bank_path).resolve())
+    if getattr(env, "_slj_state_bank_path", None) != cache_key:
+        payload = json.loads(Path(state_bank_path).read_text(encoding="utf-8"))
+        bank = {}
+        for side_name, categories in payload["states"].items():
+            bank[side_name] = {}
+            for category, states in categories.items():
+                if not states:
+                    raise ValueError(f"empty jump reset state category: {side_name}/{category}")
+                bank[side_name][category] = {
+                    name: torch.tensor(
+                        [state[name] for state in states],
+                        dtype=torch.float32,
+                        device=env.device,
+                    )
+                    for name in states[0]
+                }
+        env._slj_state_bank_path = cache_key
+        env._slj_state_bank = bank
+
+    u = torch.rand(len(env_ids), device=env.device)
+    compressed_cut = standing_prob + compressed_prob
+    airborne_cut = compressed_cut + airborne_prob
+    kinds = torch.zeros(len(env_ids), dtype=torch.long, device=env.device)
+    kinds[(u >= standing_prob) & (u < compressed_cut)] = 1
+    kinds[(u >= compressed_cut) & (u < airborne_cut)] = 2
+    kinds[u >= airborne_cut] = 3
+    special = kinds > 0
+    if not bool(special.any()):
+        return
+    special_ids = env_ids[special]
+    special_kinds = kinds[special]
+    sides = torch.where(
+        torch.rand(len(special_ids), device=env.device) < 0.5,
+        -torch.ones(len(special_ids), device=env.device),
+        torch.ones(len(special_ids), device=env.device),
+    )
+    env._slj_reset_kind[special_ids] = special_kinds
+    env._slj_reset_side[special_ids] = sides
+
+    asset: Entity = env.scene[asset_cfg.name]
+    servo_ids = _servo_joint_ids(env, asset)
+    for side_value, side_name in ((-1.0, "left"), (1.0, "right")):
+        for kind, category in ((1, "compressed"), (2, "airborne"), (3, "landing")):
+            selected = (sides == side_value) & (special_kinds == kind)
+            ids = special_ids[selected]
+            if len(ids) == 0:
+                continue
+            states = env._slj_state_bank[side_name][category]
+            choices = torch.randint(
+                len(states["root_pos"]), (len(ids),), device=env.device
+            )
+            root_pose = torch.cat(
+                (
+                    states["root_pos"][choices]
+                    + env.scene.terrain.env_origins[ids],
+                    states["root_quat"][choices],
+                ),
+                dim=1,
+            )
+            root_velocity = torch.cat(
+                (
+                    states["root_lin_vel"][choices],
+                    states["root_ang_vel"][choices],
+                ),
+                dim=1,
+            )
+            asset.write_root_link_pose_to_sim(root_pose, env_ids=ids)
+            asset.write_root_link_velocity_to_sim(root_velocity, env_ids=ids)
+            joint_pos = asset.data.joint_pos[ids].clone()
+            joint_vel = asset.data.joint_vel[ids].clone()
+            joint_pos[:, servo_ids] = states["joint_pos"][choices]
+            joint_vel[:, servo_ids] = states["joint_vel"][choices]
+            asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=ids)
+
+            env._slj_initial_grounded[ids] = True
+            env._slj_attempt_started[ids] = True
+            env._slj_baseline_z[ids] = states["baseline_z"][choices]
+            env._slj_peak_height_gain[ids] = states["peak_height_gain"][choices]
+            if kind == 1:
+                env._slj_previous_support[ids] = True
+                env._slj_previous_command_phase[ids] = -1.0
+            else:
+                env._slj_stage[ids] = _SLJ_FLIGHT
+                env._slj_previous_support[ids] = False
+                env._slj_previous_command_phase[ids] = 1.0
 
 
 def _update_single_leg_jump(

@@ -2,9 +2,15 @@
 
 import os
 from copy import deepcopy
+from pathlib import Path
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.managers import EventTermCfg, RewardTermCfg, TerminationTermCfg
+from mjlab.managers import (
+    CurriculumTermCfg,
+    EventTermCfg,
+    RewardTermCfg,
+    TerminationTermCfg,
+)
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
@@ -19,6 +25,9 @@ from mjlab_microduck.tasks.microduck_single_leg_stand_env_cfg import (
 
 
 EPISODE_LENGTH_S = 6.0
+RESET_STATE_BANK = (
+    Path(__file__).resolve().parent / "data" / "single_leg_jump_reset_states.json"
+)
 
 
 def _fixed_play_mode() -> int:
@@ -78,6 +87,13 @@ def make_microduck_single_leg_jump_env_cfg(
     cfg.events["reset_single_leg_jump"] = EventTermCfg(
         func=microduck_mdp.reset_single_leg_jump_state,
         mode="reset",
+        params={
+            "state_bank_path": str(RESET_STATE_BANK),
+            "standing_prob": 0.60 if not play else 1.0,
+            "compressed_prob": 0.25 if not play else 0.0,
+            "airborne_prob": 0.075 if not play else 0.0,
+            "landing_prob": 0.075 if not play else 0.0,
+        },
     )
     cfg.terminations["jump_success"] = TerminationTermCfg(
         func=microduck_mdp.single_leg_jump_success,
@@ -89,6 +105,51 @@ def make_microduck_single_leg_jump_env_cfg(
         time_out=False,
         params=jump_params,
     )
+    if not play:
+        cfg.curriculum["jump_reset_mix"] = CurriculumTermCfg(
+            func=microduck_mdp.event_param_curriculum,
+            params={
+                "event_name": "reset_single_leg_jump",
+                "param_stages": [
+                    {
+                        "step": 0,
+                        "params": {
+                            "standing_prob": 0.60,
+                            "compressed_prob": 0.25,
+                            "airborne_prob": 0.075,
+                            "landing_prob": 0.075,
+                        },
+                    },
+                    {
+                        "step": 1000 * 24,
+                        "params": {
+                            "standing_prob": 0.75,
+                            "compressed_prob": 0.15,
+                            "airborne_prob": 0.05,
+                            "landing_prob": 0.05,
+                        },
+                    },
+                    {
+                        "step": 2000 * 24,
+                        "params": {
+                            "standing_prob": 0.90,
+                            "compressed_prob": 0.06,
+                            "airborne_prob": 0.02,
+                            "landing_prob": 0.02,
+                        },
+                    },
+                    {
+                        "step": 3000 * 24,
+                        "params": {
+                            "standing_prob": 1.0,
+                            "compressed_prob": 0.0,
+                            "airborne_prob": 0.0,
+                            "landing_prob": 0.0,
+                        },
+                    },
+                ],
+            },
+        )
     return cfg
 
 

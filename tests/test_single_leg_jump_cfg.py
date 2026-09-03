@@ -1,4 +1,5 @@
 import pytest
+import json
 import torch
 from mjlab.tasks.registry import list_tasks, load_runner_cls
 
@@ -8,6 +9,7 @@ from mjlab_microduck.tasks import (
 )
 from mjlab_microduck.tasks.microduck_single_leg_jump_env_cfg import (
     EPISODE_LENGTH_S,
+    RESET_STATE_BANK,
     MicroduckSingleLegJumpRlCfg,
     make_microduck_single_leg_jump_env_cfg,
 )
@@ -111,3 +113,64 @@ def test_short_contact_flicker_is_not_a_landing():
     assert not bool(takeoff[0])
     assert not bool(landing[0])
     assert not bool(failed[0])
+
+
+def test_reverse_curriculum_uses_harvested_states_and_anneals_to_standing():
+    cfg = make_microduck_single_leg_jump_env_cfg()
+    params = cfg.events["reset_single_leg_jump"].params
+    assert params["state_bank_path"] == str(RESET_STATE_BANK)
+    assert sum(
+        params[name]
+        for name in (
+            "standing_prob",
+            "compressed_prob",
+            "airborne_prob",
+            "landing_prob",
+        )
+    ) == pytest.approx(1.0)
+    stages = cfg.curriculum["jump_reset_mix"].params["param_stages"]
+    assert stages[0]["params"] == {
+        "standing_prob": 0.60,
+        "compressed_prob": 0.25,
+        "airborne_prob": 0.075,
+        "landing_prob": 0.075,
+    }
+    assert stages[-1]["params"] == {
+        "standing_prob": 1.0,
+        "compressed_prob": 0.0,
+        "airborne_prob": 0.0,
+        "landing_prob": 0.0,
+    }
+    play = make_microduck_single_leg_jump_env_cfg(play=True)
+    assert "jump_reset_mix" not in play.curriculum
+    assert play.events["reset_single_leg_jump"].params["standing_prob"] == 1.0
+
+
+def test_harvested_state_bank_is_balanced_and_well_formed():
+    payload = json.loads(RESET_STATE_BANK.read_text())
+    assert payload["version"] == 1
+    for side in ("left", "right"):
+        for category in ("compressed", "airborne", "landing"):
+            states = payload["states"][side][category]
+            assert states
+            for state in states:
+                assert len(state["root_pos"]) == 3
+                assert len(state["root_quat"]) == 4
+                assert len(state["root_lin_vel"]) == 3
+                assert len(state["root_ang_vel"]) == 3
+                assert len(state["joint_pos"]) == 14
+                assert len(state["joint_vel"]) == 14
+                assert torch.isfinite(
+                    torch.tensor(
+                        [
+                            *state["root_pos"],
+                            *state["root_quat"],
+                            *state["root_lin_vel"],
+                            *state["root_ang_vel"],
+                            *state["joint_pos"],
+                            *state["joint_vel"],
+                            state["baseline_z"],
+                            state["peak_height_gain"],
+                        ]
+                    )
+                ).all()

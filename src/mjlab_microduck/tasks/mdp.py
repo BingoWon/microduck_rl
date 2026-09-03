@@ -6996,7 +6996,6 @@ def single_leg_jump_banked_height_reward(
     normalized = torch.clamp(
         env._slj_peak_height_gain / max(target_height_gain, 1e-6),
         min=0.0,
-        max=1.0,
     )
     return env._slj_completion_event.float() * normalized / env.step_dt
 

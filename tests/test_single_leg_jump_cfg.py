@@ -226,7 +226,7 @@ def test_terminal_rewards_are_banked_until_success():
     assert cfg.rewards["strict_single_leg_hold"].params["required_mode"] == "stand"
     assert "failed_episode" not in cfg.rewards
     assert cfg.rewards["jump_completion"].weight == 20.0
-    assert cfg.rewards["jump_height"].weight == 0.0
+    assert cfg.rewards["jump_height"].weight == 1.0
     assert "jump_success" in cfg.terminations
     assert "jump_failure" in cfg.terminations
     assert "reset_single_leg_jump" in cfg.events
@@ -518,7 +518,7 @@ def test_discovery_shaping_is_bounded_and_anneals_to_zero():
     }
     assert sum(shaping.values()) == 8.0
     assert cfg.rewards["jump_completion"].weight == 20.0
-    assert cfg.rewards["jump_height"].weight == 0.0
+    assert cfg.rewards["jump_height"].weight == 1.0
     assert cfg.rewards["strict_single_leg_hold"].weight == 2.0
     for name, weight in shaping.items():
         assert cfg.rewards[name].weight == weight
@@ -526,8 +526,7 @@ def test_discovery_shaping_is_bounded_and_anneals_to_zero():
         assert stages[0]["weight"] == weight
         assert stages[-1]["weight"] == 0.0
     assert cfg.rewards["action_rate_l2"].weight == -0.01
-    height_stages = cfg.curriculum["jump_height_weight"].params["weight_stages"]
-    assert [stage["weight"] for stage in height_stages] == [0.0, 0.25, 0.5, 1.0]
+    assert "jump_height_weight" not in cfg.curriculum
 
 
 def test_frontier_progress_pays_only_new_maximum():
@@ -582,6 +581,29 @@ def test_terminal_reward_is_exact_and_failed_height_bank_is_discarded(monkeypatc
     )
     scaled = completion_rate * 10.0 * env.step_dt + height_rate * env.step_dt
     assert torch.allclose(scaled, torch.tensor([10.6, 0.0]))
+
+
+def test_successful_height_reward_is_linear_and_uncapped(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp, "_update_single_leg_jump", lambda *args, **kwargs: None
+    )
+    env = SimpleNamespace(
+        step_dt=0.02,
+        _slj_completion_event=torch.tensor([True, True, False]),
+        _slj_peak_height_gain=torch.tensor([0.01, 0.02, 0.05]),
+    )
+    reward_rate = microduck_mdp.single_leg_jump_banked_height_reward(
+        env,
+        command_name="twist",
+        sensor_name="feet",
+        nonfoot_sensor_name="nonfoot",
+        asset_cfg=None,
+        target_height_gain=0.01,
+    )
+    assert torch.allclose(
+        reward_rate * env.step_dt,
+        torch.tensor([1.0, 2.0, 0.0]),
+    )
 
 
 def test_partial_reset_clears_jump_latches():

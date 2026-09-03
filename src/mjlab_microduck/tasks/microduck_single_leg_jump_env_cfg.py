@@ -88,7 +88,7 @@ def make_microduck_single_leg_jump_env_cfg(
     )
     cfg.rewards["jump_height"] = RewardTermCfg(
         func=microduck_mdp.single_leg_jump_banked_height_reward,
-        weight=0.0,
+        weight=1.0,
         params={**jump_params, "target_height_gain": 0.01},
     )
     cfg.rewards["jump_compression_progress"] = RewardTermCfg(
@@ -217,18 +217,6 @@ def make_microduck_single_leg_jump_env_cfg(
                     ],
                 },
             )
-        cfg.curriculum["jump_height_weight"] = CurriculumTermCfg(
-            func=microduck_mdp.reward_weight,
-            params={
-                "reward_name": "jump_height",
-                "weight_stages": [
-                    {"step": 0, "weight": 0.0},
-                    {"step": 1000 * 24, "weight": 0.25},
-                    {"step": 2000 * 24, "weight": 0.5},
-                    {"step": 3000 * 24, "weight": 1.0},
-                ],
-            },
-        )
         cfg.curriculum["jump_action_rate_weight"] = CurriculumTermCfg(
             func=microduck_mdp.reward_weight,
             params={

@@ -6020,6 +6020,22 @@ class SingleLegJumpCommandCfg(SingleLegStandCommandCfg):
         return SingleLegJumpCommand(self, env)
 
 
+class SingleLegCrouchCommand(SingleLegJumpCommand):
+    """Reuse the jump phase clock but expose only the crouch support side."""
+
+    def create_gui(self, name, server, *args, **kwargs) -> None:
+        SingleLegStandCommand.create_gui(self, name, server, *args, **kwargs)
+
+
+@_dataclass(kw_only=True)
+class SingleLegCrouchCommandCfg(SingleLegJumpCommandCfg):
+    jump_prob: float = 1.0
+    fixed_mode: int = 1
+
+    def build(self, env: ManagerBasedRlEnv) -> "SingleLegCrouchCommand":
+        return SingleLegCrouchCommand(self, env)
+
+
 class SingleLegJumpTransitionCommand(SingleLegJumpCommand):
     """Schedule one stand/jump transaction and return to the starting side."""
 
@@ -7327,6 +7343,319 @@ def single_leg_jump_metric(
         return env._slj_peak_height_gain * selected
     else:
         raise ValueError(f"unknown single-leg jump metric: {metric}")
+
+
+def _init_single_leg_crouch_buffers(env: ManagerBasedRlEnv) -> None:
+    if hasattr(env, "_slc_baseline_z"):
+        return
+    n = env.num_envs
+    env._slc_baseline_z = torch.zeros(n, device=env.device)
+    env._slc_lowest_z = torch.zeros(n, device=env.device)
+    env._slc_best_depth = torch.zeros(n, device=env.device)
+    env._slc_best_rise = torch.zeros(n, device=env.device)
+    env._slc_depth_event = torch.zeros(n, device=env.device)
+    env._slc_rise_event = torch.zeros(n, device=env.device)
+    env._slc_return_hold_s = torch.zeros(n, device=env.device)
+    env._slc_completed = torch.zeros(n, dtype=torch.bool, device=env.device)
+    env._slc_completion_event = torch.zeros(
+        n, dtype=torch.bool, device=env.device
+    )
+    env._slc_failed = torch.zeros(n, dtype=torch.bool, device=env.device)
+    env._slc_recovery_started = torch.zeros(
+        n, dtype=torch.bool, device=env.device
+    )
+    env._slc_valid = torch.zeros(n, dtype=torch.bool, device=env.device)
+    env._slc_final_height_error = torch.zeros(n, device=env.device)
+    env._slc_last_update = -1
+
+
+def reset_single_leg_crouch_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    state_bank_path: str,
+    fixed_side: int = 0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Reset from the verified standing bank and clear crouch progress."""
+    reset_single_leg_jump_state(
+        env,
+        env_ids,
+        state_bank_path=state_bank_path,
+        standing_prob=1.0,
+        compressed_prob=0.0,
+        airborne_prob=0.0,
+        fixed_side=fixed_side,
+        asset_cfg=asset_cfg,
+    )
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    _init_single_leg_crouch_buffers(env)
+    asset: Entity = env.scene[asset_cfg.name]
+    z = (
+        asset.data.root_link_pos_w[env_ids, 2]
+        - env.scene.terrain.env_origins[env_ids, 2]
+    )
+    env._slc_baseline_z[env_ids] = z
+    env._slc_lowest_z[env_ids] = z
+    env._slc_best_depth[env_ids] = 0.0
+    env._slc_best_rise[env_ids] = 0.0
+    env._slc_depth_event[env_ids] = 0.0
+    env._slc_rise_event[env_ids] = 0.0
+    env._slc_return_hold_s[env_ids] = 0.0
+    env._slc_completed[env_ids] = False
+    env._slc_completion_event[env_ids] = False
+    env._slc_failed[env_ids] = False
+    env._slc_recovery_started[env_ids] = False
+    env._slc_valid[env_ids] = False
+    env._slc_final_height_error[env_ids] = 0.0
+    env._slc_last_update = -1
+
+
+def _update_single_leg_crouch(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    height_unit: float,
+    return_tolerance: float,
+    return_hold_s: float,
+) -> None:
+    step = int(env.common_step_counter)
+    if getattr(env, "_slc_last_update", None) == step:
+        return
+    _init_single_leg_crouch_buffers(env)
+    env._slc_depth_event.zero_()
+    env._slc_rise_event.zero_()
+    env._slc_completion_event.zero_()
+
+    command = env.command_manager.get_command(command_name)
+    phase = command[:, 2]
+    _, support, swing, _ = _single_leg_command_state(env, command_name)
+    contacts = _single_leg_contacts(env, sensor_name).bool()
+    batch = torch.arange(env.num_envs, device=env.device)
+    support_contact = contacts[batch, support]
+    swing_contact = contacts[batch, swing]
+    nonfoot_clear = any_contact_cost(env, nonfoot_sensor_name) == 0.0
+    valid = support_contact & ~swing_contact & nonfoot_clear
+    env._slc_valid = valid
+    env._slc_failed |= ~nonfoot_clear
+
+    asset: Entity = env.scene[asset_cfg.name]
+    z = (
+        asset.data.root_link_pos_w[:, 2]
+        - env.scene.terrain.env_origins[:, 2]
+    )
+    down_phase = phase < -0.5
+    up_phase = phase > 0.5
+    env._slc_recovery_started |= up_phase
+
+    old_depth = env._slc_best_depth.clone()
+    depth = torch.clamp(env._slc_baseline_z - z, min=0.0)
+    env._slc_best_depth = torch.where(
+        down_phase & valid,
+        torch.maximum(env._slc_best_depth, depth),
+        env._slc_best_depth,
+    )
+    env._slc_lowest_z = env._slc_baseline_z - env._slc_best_depth
+    env._slc_depth_event = torch.clamp(
+        env._slc_best_depth - old_depth, min=0.0
+    ) / max(height_unit, 1e-6)
+
+    old_rise = env._slc_best_rise.clone()
+    rise = torch.clamp(z - env._slc_lowest_z, min=0.0)
+    env._slc_best_rise = torch.where(
+        up_phase & valid,
+        torch.maximum(env._slc_best_rise, rise),
+        env._slc_best_rise,
+    )
+    env._slc_rise_event = torch.clamp(
+        env._slc_best_rise - old_rise, min=0.0
+    ) / max(height_unit, 1e-6)
+
+    final_phase = env._slc_recovery_started & (phase.abs() <= 0.5)
+    height_error = torch.abs(z - env._slc_baseline_z)
+    env._slc_final_height_error = height_error
+    return_valid = (
+        final_phase
+        & valid
+        & (env._slc_best_depth >= return_tolerance)
+        & (height_error <= return_tolerance)
+    )
+    env._slc_return_hold_s = torch.where(
+        return_valid,
+        env._slc_return_hold_s + env.step_dt,
+        torch.zeros_like(env._slc_return_hold_s),
+    )
+    completed = (
+        ~env._slc_completed
+        & (env._slc_return_hold_s >= return_hold_s)
+    )
+    env._slc_completion_event = completed
+    env._slc_completed |= completed
+    env._slc_last_update = step
+
+
+def single_leg_crouch_depth_progress(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    height_unit: float = 0.01,
+    return_tolerance: float = 0.005,
+    return_hold_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_crouch(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        height_unit,
+        return_tolerance,
+        return_hold_s,
+    )
+    return env._slc_depth_event / env.step_dt
+
+
+def single_leg_crouch_return_progress(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    height_unit: float = 0.01,
+    return_tolerance: float = 0.005,
+    return_hold_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_crouch(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        height_unit,
+        return_tolerance,
+        return_hold_s,
+    )
+    return env._slc_rise_event / env.step_dt
+
+
+def single_leg_crouch_completion_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    height_unit: float = 0.01,
+    return_tolerance: float = 0.005,
+    return_hold_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_crouch(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        height_unit,
+        return_tolerance,
+        return_hold_s,
+    )
+    return env._slc_completion_event.float() / env.step_dt
+
+
+def single_leg_crouch_success(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    height_unit: float = 0.01,
+    return_tolerance: float = 0.005,
+    return_hold_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_crouch(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        height_unit,
+        return_tolerance,
+        return_hold_s,
+    )
+    return env._slc_completed
+
+
+def single_leg_crouch_failure(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    height_unit: float = 0.01,
+    return_tolerance: float = 0.005,
+    return_hold_s: float = 0.5,
+) -> torch.Tensor:
+    _update_single_leg_crouch(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        height_unit,
+        return_tolerance,
+        return_hold_s,
+    )
+    return env._slc_failed
+
+
+def single_leg_crouch_metric(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    nonfoot_sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+    metric: str,
+    support_side: int,
+    height_unit: float = 0.01,
+    return_tolerance: float = 0.005,
+    return_hold_s: float = 0.5,
+) -> torch.Tensor:
+    if support_side not in (-1, 1):
+        raise ValueError("support_side must be -1 or 1")
+    _update_single_leg_crouch(
+        env,
+        command_name,
+        sensor_name,
+        nonfoot_sensor_name,
+        asset_cfg,
+        height_unit,
+        return_tolerance,
+        return_hold_s,
+    )
+    side, _, _, _ = _single_leg_command_state(env, command_name)
+    selected = side == float(support_side)
+    if metric == "command_count":
+        return selected.float()
+    if metric == "completion_rate":
+        values = env._slc_completed.float()
+    elif metric == "failure_rate":
+        values = env._slc_failed.float()
+    elif metric == "max_depth":
+        values = env._slc_best_depth
+    elif metric == "max_rise":
+        values = env._slc_best_rise
+    elif metric == "final_height_error":
+        values = env._slc_final_height_error
+    else:
+        raise ValueError(f"unknown single-leg crouch metric: {metric}")
+    side_mean = torch.sum(values * selected) / torch.clamp(
+        torch.sum(selected), min=1
+    )
+    return side_mean.expand(env.num_envs)
 
 
 def ball_pos_in_base(

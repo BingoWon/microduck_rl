@@ -654,7 +654,7 @@ Status: PLANNED | INITIALIZING | ACTIVE | PROMOTED | REJECTED | PAUSED | FAILED
 
 ### EXP-20260904-01 — single-leg-crouch-return-v1
 
-Status: PLANNED
+Status: READY
 
 #### Context
 
@@ -670,6 +670,7 @@ Status: PLANNED
 - 下蹲 phase 只奖励新的有效最低高度；
 - 恢复 phase 只奖励新的有效最高高度；
 - 最终回到 episode 初始高度 ±5 mm 并保持 0.5 s；
+- 必须先产生至少 5 mm 有效下蹲，防止原地不动骗取 completion；
 - 这个密集、无封顶、无速度偏好的合同足以学习单腿下蹲恢复。
 
 #### Parent
@@ -703,13 +704,17 @@ SHA-256:
 - entropy：0；
 - LR：`5e-5`；
 - epochs：1。
+- teacher anchor：关闭；
+- symmetry mirror loss：开启。
 
 #### Gates
 
-- 在线拒绝：model25/50/100，任一侧连续不增长或 model50 completion=0 即拒绝；
-- 固定晋级：每侧 128 局，model100 各至少 50 completion，平均 depth 至少 10 mm；
+- 在线拒绝：model25/50/75/99，任一侧连续不增长或 model50 completion=0 即拒绝；
+- 固定晋级：每侧 128 局，model99 各至少 50 completion，平均 depth 至少 10 mm；
 - rollback：strict-v4 model3750；
 - 最大首轮预算：100 iterations gate，未晋级不自动续跑。
+
+`model_99` 是 runner 0 基编号下完成 100 个 learning iterations 的终点。
 
 #### Operations
 
@@ -721,10 +726,21 @@ SHA-256:
 
 #### Result
 
-- 尚未启动。
+- 代码、cfg、固定评估、viewer、自动 checkpoint 评估和中文 TensorBoard 已实现；
+- `244 passed, 1 skipped`；
+- 64 env × 5 iterations CPU smoke 完成；
+- actor obs 61D，action 14D，固定 std 0.02，`nan_state=0`；
+- smoke checkpoint：
+  `logs/rsl_rl/single_leg_crouch/2026-09-04_00-31-55_single_leg_crouch/model_4.pt`；
+- smoke checkpoint SHA-256：
+  `edc6f305ab3ee9b456bcd0948d8b03199e3b2e201fc27461eb4497c91c27a0e4`；
+- 自动导出 ONNX SHA-256：
+  `1a18932eb86599acd5707814964de4f4952a3f33857a337351113b0874690294`；
+- 极小固定评估已验证能区分“安全但未下蹲”和完成动作；
+- 正式付费训练尚未启动。
 
 #### Verdict
 
-- PLANNED；
+- READY_TO_DEPLOY；
 - 执行文档：
   `docs/2026-09-04-single-leg-crouch-return-execution.md`。

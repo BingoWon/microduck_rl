@@ -26,6 +26,9 @@ class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
 class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
     """Warm-start predecessor actors while preserving native jump resumes."""
 
+    action_std = 0.005
+    warm_start_env = "SINGLE_LEG_JUMP_ACTOR_WARM_START"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._lock_action_std()
@@ -35,7 +38,7 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
         distribution = getattr(getattr(alg, "actor", None), "distribution", None)
         std_param = getattr(distribution, "std_param", None)
         if std_param is not None:
-            std_param.data.fill_(0.005)
+            std_param.data.fill_(self.action_std)
             std_param.requires_grad_(False)
 
     def _ensure_teacher_anchor(self):
@@ -52,11 +55,13 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
 
         import torch
 
+        if map_location is None:
+            map_location = getattr(self, "device", None)
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         jump_pretrained = bool(
             (checkpoint.get("infos") or {}).get("hop_command_pretrained", False)
         )
-        explicit = os.environ.get("SINGLE_LEG_JUMP_ACTOR_WARM_START", "").lower()
+        explicit = os.environ.get(self.warm_start_env, "").lower()
         if explicit not in (
             "",
             "0",
@@ -69,7 +74,7 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
             "actor",
         ):
             raise ValueError(
-                "SINGLE_LEG_JUMP_ACTOR_WARM_START must be stand, actor, or a boolean"
+                f"{self.warm_start_env} must be stand, actor, or a boolean"
             )
         warm_start = jump_pretrained or explicit in (
             "1",
@@ -106,6 +111,11 @@ class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
         self.current_learning_iteration = 0
         self.env.unwrapped.common_step_counter = 0
         return infos
+
+
+class MicroduckCrouchWarmStartRunner(MicroduckActorWarmStartRunner):
+    action_std = 0.02
+    warm_start_env = "SINGLE_LEG_CROUCH_ACTOR_WARM_START"
 
 
 from .microduck_velocity_env_cfg import (
@@ -170,6 +180,10 @@ from .microduck_single_leg_jump_env_cfg import (
     make_microduck_single_leg_jump_transition_env_cfg,
     MicroduckSingleLegJumpRlCfg,
     MicroduckSingleLegJumpTransitionRlCfg,
+)
+from .microduck_single_leg_crouch_env_cfg import (
+    make_microduck_single_leg_crouch_env_cfg,
+    MicroduckSingleLegCrouchRlCfg,
 )
 from .backlash import make_backlash_variant
 
@@ -360,6 +374,14 @@ register_mjlab_task(
     play_env_cfg=make_microduck_single_leg_jump_transition_env_cfg(play=True),
     rl_cfg=MicroduckSingleLegJumpTransitionRlCfg,
     runner_cls=MicroduckActorWarmStartRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-SingleLegCrouch-Flat-MicroDuck",
+    env_cfg=make_microduck_single_leg_crouch_env_cfg(),
+    play_env_cfg=make_microduck_single_leg_crouch_env_cfg(play=True),
+    rl_cfg=MicroduckSingleLegCrouchRlCfg,
+    runner_cls=MicroduckCrouchWarmStartRunner,
 )
 
 # Backlash variants — ±1° serial gear play per servo + encoder-through-backlash

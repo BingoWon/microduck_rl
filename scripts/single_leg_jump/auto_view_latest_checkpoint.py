@@ -113,6 +113,7 @@ def start_viewer(
     port: int,
     device: str,
     log_path: Path,
+    play_script: Path,
 ) -> subprocess.Popen:
     log = log_path.open("ab", buffering=0)
     process = subprocess.Popen(
@@ -121,7 +122,7 @@ def start_viewer(
             "-n",
             "10",
             sys.executable,
-            str(Path(__file__).with_name("play_checkpoint.py")),
+            str(play_script),
             str(checkpoint),
             "--port",
             str(port),
@@ -151,6 +152,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--interval", type=float, default=15.0)
+    parser.add_argument(
+        "--play-script",
+        type=Path,
+        default=Path(__file__).with_name("play_checkpoint.py"),
+    )
     args = parser.parse_args()
     args.local_dir.mkdir(parents=True, exist_ok=True)
     args.state_dir.mkdir(parents=True, exist_ok=True)
@@ -178,6 +184,7 @@ def main() -> None:
                     args.port,
                     args.device,
                     args.state_dir / "viewer.log",
+                    args.play_script,
                 )
                 shown_step = step
                 write_json(

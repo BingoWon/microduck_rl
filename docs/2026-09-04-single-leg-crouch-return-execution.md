@@ -201,10 +201,15 @@ reward_up = max(rise - best_rise_so_far, 0) / 0.01
 
 ```text
 valid
+AND 本局有效下蹲深度至少 5 mm
 AND abs(z - z_start) <= 5 mm
 ```
 
 连续保持 0.5 s 后支付一次 completion event。
+
+5 mm 下蹲门槛只用于防止“原地不动直到最终阶段”骗取完成奖励，复用同一个
+±5 mm 高度容差，不增加关节角度或姿态目标。下蹲深度奖励仍然连续、不封顶；
+正式晋级仍要求左右平均下蹲深度至少 10 mm。
 
 ### 第一轮权重
 
@@ -264,7 +269,7 @@ symmetry mirror loss: enabled
 
 ## 实现文件
 
-计划新增：
+已新增：
 
 - `src/mjlab_microduck/tasks/microduck_single_leg_crouch_env_cfg.py`
 - `tests/test_single_leg_crouch_cfg.py`
@@ -273,29 +278,57 @@ symmetry mirror loss: enabled
 - `scripts/single_leg_crouch/auto_eval_checkpoints.py`
 - `scripts/single_leg_crouch/publish_chinese_dashboard.py`
 
-计划修改：
+已修改：
 
 - `src/mjlab_microduck/tasks/mdp.py`
 - `src/mjlab_microduck/tasks/__init__.py`
-- `AGENTS.md`（仅在新永久经验出现时）
+- `scripts/single_leg_jump/auto_view_latest_checkpoint.py`
 
 禁止复用或继续修改旧 jump reward/state machine 来伪装成新任务。新任务必须拥有独立
 experiment name、metrics 和 TensorBoard。
+
+实现采用独立 `_slc_*` 状态，不修改旧 `_slj_*` 跳跃状态机。只复用已验证的 standing
+状态库加载入口、左右支撑接触工具和内部 phase 时钟。
 
 ## Smoke Gate
 
 恢复付费 GPU 前必须在本地完成：
 
-- cfg/test 全通过；
-- 64 env × 5 iteration smoke；
-- 61D actor obs；
-- 无 NaN；
-- checkpoint 可保存；
-- ONNX 可导出；
-- viewer 可固定左/右侧；
-- progress reward 保持时为 0；
-- 离地时 task reward 为 0 且无额外惩罚；
-- ±5 mm completion band 单元测试通过。
+- [x] cfg/test 全通过；
+- [x] 64 env × 5 iteration smoke；
+- [x] 61D actor obs；
+- [x] 无 NaN；
+- [x] checkpoint 可保存；
+- [x] ONNX 可导出；
+- [x] viewer 可固定左/右侧；
+- [x] progress reward 保持时为 0；
+- [x] 离地时 task reward 为 0 且无额外惩罚；
+- [x] ±5 mm completion band 单元测试通过。
+
+最终 smoke：
+
+```text
+run:
+logs/rsl_rl/single_leg_crouch/2026-09-04_00-31-55_single_leg_crouch
+
+model_4.pt SHA-256:
+edc6f305ab3ee9b456bcd0948d8b03199e3b2e201fc27461eb4497c91c27a0e4
+
+ONNX SHA-256:
+1a18932eb86599acd5707814964de4f4952a3f33857a337351113b0874690294
+
+tests:
+244 passed, 1 skipped
+
+smoke:
+5/5 iterations
+actor obs 61D
+action 14D
+action std 0.02
+nan_state 0
+```
+
+smoke 只证明训练、保存、ONNX 和指标链路可运行，不作为行为晋级证据。
 
 ## 在线拒绝 Gate
 
@@ -304,8 +337,12 @@ experiment name、metrics 和 TensorBoard。
 ```text
 model_25
 model_50
-model_100
+model_75
+model_99
 ```
+
+runner 使用 0 基 iteration 编号，因此 `model_99` 是完成 100 个 learning iterations
+后的首轮终点。
 
 立即拒绝条件：
 
@@ -323,7 +360,7 @@ model_100
 
 每侧 128 deterministic episodes，100% standing start。
 
-model100 初始晋级门槛：
+model99（100 轮终点）初始晋级门槛：
 
 - 左右 completion 各至少 50/128；
 - 左右平均最大下蹲深度各至少 10 mm；
@@ -363,7 +400,7 @@ GPU: RTX 4090
 - Trainer 进度监控；
 - TensorBoard event 同步；
 - checkpoint 原子同步；
-- model25/50/100 本地固定评估；
+- model25/50/75/99 本地固定评估；
 - 最新 checkpoint 8080 自动展示。
 
 每次汇报包含：
@@ -402,7 +439,7 @@ instance 49723497 保持 stopped，直到全部替代条件 ready。
 
 ```text
 DOC_READY
-CODE_PENDING
+CODE_READY
 DEVICE_STOPPED
 TRAINING_NOT_STARTED
 ```

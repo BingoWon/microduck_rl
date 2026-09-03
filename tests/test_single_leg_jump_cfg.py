@@ -221,3 +221,10 @@ def test_training_metrics_are_split_by_support_side():
             assert term.func is microduck_mdp.single_leg_jump_metric
             assert term.reduce == "last"
             assert term.params["support_side"] == (-1 if side == "left" else 1)
+
+
+def test_jump_task_is_documented_in_readme():
+    readme = (RESET_STATE_BANK.parents[4] / "README.md").read_text()
+    assert "Mjlab-SingleLegJump-Flat-MicroDuck" in readme
+    assert "[1, side, -1]" in readme
+    assert "[1, side, +1]" in readme

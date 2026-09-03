@@ -73,6 +73,7 @@ instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 | `Mjlab-BallKick-Flat-MicroDuck` | flat | Kick a 70 mm / 15 g ball forward (actor is ball-blind) |
 | `Mjlab-Roulade-Flat-MicroDuck` | flat | Forward roll over the head, land back on the feet |
 | `Mjlab-SingleLegStand-Flat-MicroDuck` | flat | Commanded left/right single-leg standing in one symmetric policy |
+| `Mjlab-SingleLegJump-Flat-MicroDuck` | flat | One commanded left/right single-leg jump, same-foot landing, then recovery |
 | `Mjlab-Velocity-Flat-MicroDuck-Rollers` | flat | Roller-skate velocity tracking (passive wheels under the feet) |
 | `Mjlab-Velocity-Swizzle-MicroDuck` | flat | Classic symmetric swizzle skating |
 | `Mjlab-RollerCrouch-Flat-MicroDuck` | flat | Crouch while gliding on rollers |
@@ -91,6 +92,18 @@ uv run scripts/infer_policy.py --walking walk.onnx --standing stand.onnx \
 
 Keyboard-driven (velocity commands, `G` ground pick, `Y` sit/stand, `R` roulade,
 `K`/`L` kicks); `--debug`, `--save-csv`, `--record` support sim2real comparisons.
+
+The single-leg policy family keeps four user-level semantics in the existing
+3D twist command block: left/right stand and one-shot left/right jump. Jump
+compression and extension are controller-owned phases, not additional user
+poses:
+
+```text
+[0, side,  0]  hold the commanded single-leg stand
+[1, side, -1]  compress for a one-shot jump
+[1, side, +1]  extend
+[1, side,  0]  recover the same single-leg stand
+```
 The servos are simulated with the same BAM M6 XL330 model the policies are
 trained against (voltage control + load-dependent friction, via
 `bam.mujoco.MujocoController`); `--vin` / `--vin-drop-gain` / `--kp-fw` pin the

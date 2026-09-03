@@ -649,3 +649,82 @@ Status: PLANNED | INITIALIZING | ACTIVE | PROMOTED | REJECTED | PAUSED | FAILED
 - 所有关键制品在销毁实例前生成 SHA-256。
 - 当前账本是实验决策入口；运维细节继续记录在
   `docs/2026-09-03-vast-paid-gpu-training-operations.md`。
+
+## 2026-09-04 预登记
+
+### EXP-20260904-01 — single-leg-crouch-return-v1
+
+Status: PLANNED
+
+#### Context
+
+- 单腿跳训练已暂停，Vast GPU 费用为 0。
+- 当前要验证的更小物理问题是：已有单腿站 actor 能否在同一支撑腿上下降，再恢复原高度。
+- 上一轮 knee-crouch-composite 同时包含跳跃、reverse reset、恢复和膝角复合，目标过多。
+- 用户明确要求第一版只使用高度进度，不奖励具体屈膝、速度、COM 或倾斜。
+
+#### Hypothesis
+
+- 从 strict-v4 单腿站 actor warm-start；
+- 100% standing start；
+- 下蹲 phase 只奖励新的有效最低高度；
+- 恢复 phase 只奖励新的有效最高高度；
+- 最终回到 episode 初始高度 ±5 mm 并保持 0.5 s；
+- 这个密集、无封顶、无速度偏好的合同足以学习单腿下蹲恢复。
+
+#### Parent
+
+```text
+checkpoint:
+/Users/bingo/Documents/Codex/2026-09-02/wo-x/work/cloud/
+training-monitor-49645174-strict-v4/remote-training/model_3750.pt
+
+SHA-256:
+4f445e8eaa482b64596d69044730aafc42d3ed0bd78f52ce92e0cfa95d67a526
+```
+
+- actor/normalizer：继承；
+- critic/optimizer/iteration：重新开始；
+- 当前代码基线 commit：`1861ca0893b9ed77317757921b6085913913a5f1`；
+- 当前旧 jump 实验 dirty patch 不得进入新任务提交。
+
+#### Contract
+
+- task id：`Mjlab-SingleLegCrouch-Flat-MicroDuck`；
+- environments：smoke 64，正式 8192；
+- episode：5.5 s；
+- phase：0.5 s hold / 2.0 s down / 2.0 s return / 1.0 s final；
+- command：左右各 50%；
+- reset：100% standing；
+- rewards：down5 / return5 / completion10；
+- completion band：初始高度 ±5 mm，hold 0.5 s；
+- 离地：0 reward、0 penalty；
+- std：fixed 0.02；
+- entropy：0；
+- LR：`5e-5`；
+- epochs：1。
+
+#### Gates
+
+- 在线拒绝：model25/50/100，任一侧连续不增长或 model50 completion=0 即拒绝；
+- 固定晋级：每侧 128 局，model100 各至少 50 completion，平均 depth 至少 10 mm；
+- rollback：strict-v4 model3750；
+- 最大首轮预算：100 iterations gate，未晋级不自动续跑。
+
+#### Operations
+
+- Vast instance：49723497；
+- 原价：`$0.3677777778/hour`；
+- 当前状态：stopped/offline，`rentable=false`；
+- 恢复超过 30 s 仍 scheduling 则不等待，转同价 4090 watcher；
+- TensorBoard、自动评估、checkpoint 同步和 8080 viewer 必须在正式启动前 ready。
+
+#### Result
+
+- 尚未启动。
+
+#### Verdict
+
+- PLANNED；
+- 执行文档：
+  `docs/2026-09-04-single-leg-crouch-return-execution.md`。

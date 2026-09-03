@@ -6394,7 +6394,11 @@ def single_leg_jump_transition_flags(
         & (peak_height_gain >= min_height_gain)
     )
     bad_contact = (
-        ((stage == _SLJ_FLIGHT) | (stage == _SLJ_RECOVERY))
+        (
+            ((stage == _SLJ_PREPARE) & initial_grounded)
+            | (stage == _SLJ_FLIGHT)
+            | (stage == _SLJ_RECOVERY)
+        )
         & (swing_contact | ~nonfoot_clear)
     )
     return takeoff, landing, bad_contact

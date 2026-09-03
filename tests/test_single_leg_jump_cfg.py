@@ -1,5 +1,7 @@
-import pytest
 import json
+from types import SimpleNamespace
+
+import pytest
 import torch
 from mjlab.tasks.registry import list_tasks, load_runner_cls
 
@@ -115,6 +117,22 @@ def test_short_contact_flicker_is_not_a_landing():
     assert not bool(failed[0])
 
 
+def test_wrong_contact_fails_before_takeoff_once_single_leg_is_established():
+    _, _, failed = microduck_mdp.single_leg_jump_transition_flags(
+        stage=torch.tensor([0, 0, 0]),
+        initial_grounded=torch.tensor([True, True, False]),
+        previous_support_contact=torch.tensor([True, True, True]),
+        support_contact=torch.tensor([True, True, True]),
+        swing_contact=torch.tensor([True, False, True]),
+        nonfoot_clear=torch.tensor([True, False, True]),
+        upward_velocity=torch.zeros(3),
+        peak_height_gain=torch.zeros(3),
+        min_takeoff_velocity=0.02,
+        min_height_gain=0.003,
+    )
+    assert failed.tolist() == [True, True, False]
+
+
 def test_reverse_curriculum_uses_harvested_states_and_anneals_to_standing():
     cfg = make_microduck_single_leg_jump_env_cfg()
     params = cfg.events["reset_single_leg_jump"].params
@@ -204,6 +222,49 @@ def test_frontier_progress_pays_only_new_maximum():
         frontier, paid, target=0.01
     )
     assert torch.allclose(reward, torch.tensor([0.0, 0.5, 0.0, 0.0]))
+
+
+def test_terminal_reward_is_exact_and_failed_height_bank_is_discarded(monkeypatch):
+    monkeypatch.setattr(
+        microduck_mdp, "_update_single_leg_jump", lambda *args, **kwargs: None
+    )
+    env = SimpleNamespace(
+        step_dt=0.02,
+        _slj_completed=torch.tensor([True, False]),
+        _slj_peak_height_gain=torch.tensor([0.006, 0.010]),
+    )
+    params = {
+        "command_name": "twist",
+        "sensor_name": "feet",
+        "nonfoot_sensor_name": "nonfoot",
+        "asset_cfg": None,
+    }
+    completion_rate = microduck_mdp.single_leg_jump_completion_reward(env, **params)
+    height_rate = microduck_mdp.single_leg_jump_banked_height_reward(
+        env, **params, target_height_gain=0.01
+    )
+    scaled = completion_rate * 10.0 * env.step_dt + height_rate * env.step_dt
+    assert torch.allclose(scaled, torch.tensor([10.6, 0.0]))
+
+
+def test_partial_reset_clears_jump_latches():
+    env = SimpleNamespace(num_envs=3, device="cpu")
+    microduck_mdp.reset_single_leg_jump_state(
+        env, torch.arange(3), state_bank_path=None
+    )
+    env._slj_completed[:] = True
+    env._slj_failed[:] = True
+    env._slj_took_off[:] = True
+    env._slj_landed[:] = True
+    env._slj_peak_height_gain[:] = 0.01
+    microduck_mdp.reset_single_leg_jump_state(
+        env, torch.tensor([1]), state_bank_path=None
+    )
+    assert env._slj_completed.tolist() == [True, False, True]
+    assert env._slj_failed.tolist() == [True, False, True]
+    assert env._slj_took_off.tolist() == [True, False, True]
+    assert env._slj_landed.tolist() == [True, False, True]
+    assert env._slj_peak_height_gain.tolist() == pytest.approx([0.01, 0.0, 0.01])
 
 
 def test_training_metrics_are_split_by_support_side():

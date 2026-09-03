@@ -79,9 +79,19 @@ Never launch a long run without one.
 - Do not destroy an instance until all checkpoints, configs, logs, evaluations,
   and SHA-256 manifests are synchronized and verified locally. A failed host is
   blacklisted before the offer watcher resumes.
-- Every training-status response starts with iteration/target, steps/s, GPU
-  utilization, VRAM, and `nan_state`, followed by deterministic goal metrics.
-  Do not describe reward growth as task success.
+- Every training-status response starts with iteration/target and steps/s,
+  followed immediately by a deterministic performance trend: baseline,
+  previous evaluated checkpoint, current evaluated checkpoint, absolute delta,
+  and an explicit `improving` / `flat` / `regressing` verdict. Break out left
+  and right takeoff, landing, recovery completion, and height where available.
+  If the active run has no completed fixed evaluation yet, say `unevaluated`;
+  never infer improvement from training rewards, GPU utilization, or a single
+  uncontextualized value.
+- A local viewer loads one explicit immutable checkpoint at process startup; a
+  browser refresh or a newly synchronized checkpoint does not update it.
+  Never silently point a viewer at the newest unvalidated checkpoint. Report
+  the exact loaded checkpoint and whether it is the current promoted best;
+  switching the displayed model requires restarting the viewer process.
 
 The full incident record and reusable Vast procedure are in
 `docs/2026-09-03-vast-paid-gpu-training-operations.md`.

@@ -65,6 +65,12 @@ def make_microduck_single_leg_jump_env_cfg(
 
     cfg.rewards["strict_single_leg_hold"].params["required_mode"] = "stand"
     cfg.rewards["strict_single_leg_hold"].weight = 2.0
+    for metric_name in (
+        "single_leg_success",
+        "single_leg_success_left",
+        "single_leg_success_right",
+    ):
+        cfg.metrics[metric_name].params["required_mode"] = "stand"
     cfg.rewards.pop("failed_episode", None)
     jump_params = {
         "command_name": COMMAND_NAME,

@@ -208,6 +208,12 @@ def test_frontier_progress_pays_only_new_maximum():
 
 def test_training_metrics_are_split_by_support_side():
     cfg = make_microduck_single_leg_jump_env_cfg()
+    for name in (
+        "single_leg_success",
+        "single_leg_success_left",
+        "single_leg_success_right",
+    ):
+        assert cfg.metrics[name].params["required_mode"] == "stand"
     for side in ("left", "right"):
         for metric in (
             "command_count",

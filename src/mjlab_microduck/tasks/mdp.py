@@ -5906,6 +5906,97 @@ class SingleLegStandCommandCfg(UniformVelocityCommandCfg):
         return SingleLegStandCommand(self, env)
 
 
+class SingleLegJumpCommand(SingleLegStandCommand):
+    """Command stand replay or one scheduled single-leg jump.
+
+    Command layout:
+      [0, side,  0]  stand replay
+      [1, side,  0]  jump preparation / recovery
+      [1, side, -1]  compression
+      [1, side, +1]  extension
+
+    The user chooses only the mode and side. The command term owns the phase.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._jump_prob = float(cfg.jump_prob)
+        self._is_jump = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._elapsed = torch.zeros(self.num_envs, device=self.device)
+        self._skill_gui = None
+
+    @property
+    def is_jump(self) -> torch.Tensor:
+        return self._is_jump
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        super()._resample_command(env_ids)
+        if self.cfg.fixed_mode in (0, 1):
+            self._is_jump[env_ids] = bool(self.cfg.fixed_mode)
+        else:
+            self._is_jump[env_ids] = (
+                torch.rand(len(env_ids), device=self.device) < self._jump_prob
+            )
+        self._elapsed[env_ids] = 0.0
+
+    def compute(self, dt: float) -> None:
+        super().compute(dt)
+        if self._skill_gui is not None:
+            selection = self._skill_gui.value
+            side = -1.0 if selection.startswith("Left") else 1.0
+            jump = selection.endswith("jump")
+            changed = (self.vel_command_b[:, 1] != side) | (
+                self._is_jump != jump
+            )
+            side_changed = self.vel_command_b[:, 1] != side
+            self.vel_command_b[:, 1] = side
+            self._is_jump[:] = jump
+            self._alpha[side_changed] = 0.0
+            self._elapsed[changed] = 0.0
+
+        self._elapsed += dt
+        crouch_end = self.cfg.prepare_s + self.cfg.crouch_s
+        extend_end = crouch_end + self.cfg.extend_s
+        phase = torch.where(
+            (self._elapsed >= self.cfg.prepare_s) & (self._elapsed < crouch_end),
+            -torch.ones_like(self._elapsed),
+            torch.where(
+                (self._elapsed >= crouch_end) & (self._elapsed < extend_end),
+                torch.ones_like(self._elapsed),
+                torch.zeros_like(self._elapsed),
+            ),
+        )
+        self.vel_command_b[:, 0] = self._is_jump.float()
+        self.vel_command_b[:, 2] = torch.where(
+            self._is_jump, phase, torch.zeros_like(phase)
+        )
+
+    def create_gui(self, name, server, *args, **kwargs) -> None:
+        del args, kwargs
+        side = "Right" if self.cfg.fixed_side == 1 else "Left"
+        mode = "jump" if self.cfg.fixed_mode == 1 else "stand"
+        with server.gui.add_folder(name.capitalize()):
+            self._skill_gui = server.gui.add_dropdown(
+                "Command",
+                ("Left stand", "Right stand", "Left jump", "Right jump"),
+                initial_value=f"{side} {mode}",
+            )
+
+
+@_dataclass(kw_only=True)
+class SingleLegJumpCommandCfg(SingleLegStandCommandCfg):
+    jump_prob: float = 0.75
+    fixed_mode: int = -1
+    prepare_s: float = 1.5
+    crouch_s: float = 0.22
+    extend_s: float = 0.12
+
+    def build(self, env: ManagerBasedRlEnv) -> "SingleLegJumpCommand":
+        return SingleLegJumpCommand(self, env)
+
+
 def _single_leg_command_state(
     env: ManagerBasedRlEnv,
     command_name: str,

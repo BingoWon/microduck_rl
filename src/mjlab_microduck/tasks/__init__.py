@@ -23,6 +23,33 @@ class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
             alg["symmetry_cfg"] = {k: v for k, v in sym.items() if k != "_env"}
 
 
+class MicroduckActorWarmStartRunner(MicroduckOnPolicyRunner):
+    """Load only the actor and restart PPO state for a new skill."""
+
+    def load(self, path, load_cfg=None, strict=True, map_location=None):
+        import torch
+
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        jump_pretrained = bool(
+            (checkpoint.get("infos") or {}).get("hop_command_pretrained", False)
+        )
+        infos = super().load(
+            path,
+            load_cfg={"actor": True},
+            strict=strict,
+            map_location=map_location,
+        )
+        if not jump_pretrained:
+            actor = self.alg.actor
+            actor.mlp[0].weight.data[:, [48, 50]] = 0.0
+            normalizer = actor.obs_normalizer
+            for name, value in (("_mean", 0.0), ("_var", 1.0), ("_std", 1.0)):
+                getattr(normalizer, name)[..., [48, 50]] = value
+        self.current_learning_iteration = 0
+        self.env.unwrapped.common_step_counter = 0
+        return infos
+
+
 from .microduck_velocity_env_cfg import (
     make_microduck_velocity_env_cfg,
     MicroduckRlCfg,
@@ -79,6 +106,10 @@ from .microduck_single_leg_stand_env_cfg import (
     make_microduck_single_leg_stand_env_cfg,
     make_microduck_single_leg_stand_strict_env_cfg,
     MicroduckSingleLegStandRlCfg,
+)
+from .microduck_single_leg_jump_env_cfg import (
+    make_microduck_single_leg_jump_env_cfg,
+    MicroduckSingleLegJumpRlCfg,
 )
 from .backlash import make_backlash_variant
 
@@ -253,6 +284,14 @@ register_mjlab_task(
     play_env_cfg=make_microduck_single_leg_stand_strict_env_cfg(play=True),
     rl_cfg=MicroduckSingleLegStandRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-SingleLegJump-Flat-MicroDuck",
+    env_cfg=make_microduck_single_leg_jump_env_cfg(),
+    play_env_cfg=make_microduck_single_leg_jump_env_cfg(play=True),
+    rl_cfg=MicroduckSingleLegJumpRlCfg,
+    runner_cls=MicroduckActorWarmStartRunner,
 )
 
 # Backlash variants — ±1° serial gear play per servo + encoder-through-backlash

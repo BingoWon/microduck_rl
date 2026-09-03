@@ -106,6 +106,15 @@ Never launch a long run without one.
   without operating the browser page. Never claim the user can see a model
   until `viewer-status.json` confirms `latest_remote_step == shown_step` and
   port 8080 is listening.
+- **Every training run requires a complete experiment-ledger entry.** Before
+  launch, update `docs/2026-09-03-single-leg-training-experiment-ledger.md`
+  with context, falsifiable hypothesis, parent checkpoint and SHA, exact
+  command, full reward/reset/phase contract, online rejection gate, promotion
+  gate, rollback point, and budget. At stop or switch, append measured trends,
+  deterministic results, visual observations, anomalies, cost, and an explicit
+  verdict. Never launch a paid run whose rationale exists only in chat history,
+  and never overwrite failed evidence; append corrections when an earlier
+  interpretation was wrong.
 
 The full incident record and reusable Vast procedure are in
 `docs/2026-09-03-vast-paid-gpu-training-operations.md`.

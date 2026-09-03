@@ -7134,13 +7134,13 @@ def _single_leg_jump_frontier_delta(
     return torch.clamp(current - previous, min=0.0)
 
 
-def single_leg_jump_compression_progress(
+def single_leg_jump_banked_compression_reward(
     env: ManagerBasedRlEnv,
     command_name: str,
     sensor_name: str,
     nonfoot_sensor_name: str,
     asset_cfg: SceneEntityCfg,
-    target_compression: float = 0.01,
+    compression_scale: float = 0.01,
     min_takeoff_velocity: float = 0.02,
     min_height_gain: float = 0.003,
     recovery_s: float = 0.5,
@@ -7155,15 +7155,23 @@ def single_leg_jump_compression_progress(
         min_height_gain,
         recovery_s,
     )
-    reward = _single_leg_jump_frontier_delta(
-        env._slj_max_compression,
-        env._slj_paid_compression,
-        target_compression,
+    normalized = torch.clamp(
+        env._slj_max_compression / max(compression_scale, 1e-6),
+        min=0.0,
     )
-    env._slj_paid_compression = torch.maximum(
-        env._slj_paid_compression, env._slj_max_compression
+    reset_kind = getattr(env, "_slj_reset_kind", None)
+    if reset_kind is None:
+        reset_kind = torch.zeros_like(
+            env._slj_max_compression,
+            dtype=torch.long,
+        )
+    earned_compression = reset_kind == 0
+    return (
+        env._slj_completion_event.float()
+        * earned_compression
+        * normalized
+        / env.step_dt
     )
-    return reward / env.step_dt
 
 
 def single_leg_jump_upward_progress(

@@ -31,7 +31,7 @@ def test_task_skeleton_keeps_shared_contract():
     assert isinstance(command, microduck_mdp.SingleLegJumpCommandCfg)
     assert command.jump_prob == 0.75
     assert command.prepare_s == 0.8
-    assert command.crouch_s == 0.22
+    assert command.crouch_s == 0.35
     assert command.extend_s == 0.12
     assert cfg.observations["actor"].terms["head_command"].params["dim"] == 4
     assert cfg.observations["actor"].terms["body_command"].params["dim"] == 6
@@ -556,15 +556,15 @@ def test_harvested_state_bank_is_balanced_and_well_formed():
 def test_discovery_shaping_is_bounded_and_anneals_to_zero():
     cfg = make_microduck_single_leg_jump_env_cfg()
     shaping = {
-        "jump_compression_progress": 0.5,
         "jump_upward_progress": 0.5,
         "jump_takeoff": 1.0,
         "jump_landing": 1.0,
         "jump_recovery_progress": 5.0,
     }
-    assert sum(shaping.values()) == 8.0
+    assert sum(shaping.values()) == 7.5
     assert cfg.rewards["jump_completion"].weight == 20.0
     assert cfg.rewards["jump_height"].weight == 20.0
+    assert cfg.rewards["jump_compression_progress"].weight == 5.0
     assert cfg.rewards["strict_single_leg_hold"].weight == 2.0
     for name, weight in shaping.items():
         assert cfg.rewards[name].weight == weight
@@ -573,6 +573,7 @@ def test_discovery_shaping_is_bounded_and_anneals_to_zero():
         assert stages[-1]["weight"] == 0.0
     assert cfg.rewards["action_rate_l2"].weight == -0.01
     assert "jump_height_weight" not in cfg.curriculum
+    assert "jump_compression_progress_weight" not in cfg.curriculum
 
 
 def test_frontier_progress_pays_only_new_maximum():
@@ -584,25 +585,28 @@ def test_frontier_progress_pays_only_new_maximum():
     assert torch.allclose(reward, torch.tensor([0.0, 0.5, 0.0, 0.0]))
 
 
-def test_frontier_reward_survives_reward_manager_dt_scaling(monkeypatch):
+def test_successful_compression_reward_is_linear_uncapped_and_banked(monkeypatch):
     monkeypatch.setattr(
         microduck_mdp, "_update_single_leg_jump", lambda *args, **kwargs: None
     )
     env = SimpleNamespace(
         step_dt=0.02,
-        _slj_max_compression=torch.tensor([0.005]),
-        _slj_paid_compression=torch.tensor([0.0]),
+        _slj_completion_event=torch.tensor([True, True, True, False]),
+        _slj_max_compression=torch.tensor([0.01, 0.02, 0.03, 0.04]),
+        _slj_reset_kind=torch.tensor([0, 0, 1, 0]),
     )
-    raw_rate = microduck_mdp.single_leg_jump_compression_progress(
+    reward_rate = microduck_mdp.single_leg_jump_banked_compression_reward(
         env,
         command_name="twist",
         sensor_name="feet",
         nonfoot_sensor_name="nonfoot",
         asset_cfg=None,
-        target_compression=0.01,
+        compression_scale=0.01,
     )
-    scaled_reward = raw_rate * 0.5 * env.step_dt
-    assert torch.allclose(scaled_reward, torch.tensor([0.25]))
+    assert torch.allclose(
+        reward_rate * env.step_dt,
+        torch.tensor([1.0, 2.0, 0.0, 0.0]),
+    )
 
 
 def test_terminal_reward_is_exact_and_failed_height_bank_is_discarded(monkeypatch):

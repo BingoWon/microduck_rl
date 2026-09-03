@@ -233,6 +233,13 @@ The full incident record and reusable Vast procedure are in
   buys arbitrary violence. For commanded transitions, track a slewed internal
   target (constant-rate blend) — being ahead of the ramp pays zero, so slow IS
   the argmax. Speed-cap penalties alone integrate to a bounded cost and lose.
+- **Do not cap a user-requested objective magnitude by default.** Jump height,
+  compression depth, distance, and similar "more is better" goals remain
+  linear and uncapped; a `target_*` value may define reward units but must not
+  silently become a maximum payout. If safety requires a cap, document the
+  measured physical reason and get explicit user agreement. Bank potentially
+  exploitable magnitude rewards behind successful completion and recovery so
+  crashing cannot collect them.
 - **Never gate a positive reward on being in a bad state** (fallen, low) — the
   policy parks in the cheapest qualifying pose and farms it. Use
   potential-based shaping instead (pay Δprogress, e.g. Δcos(tilt): rising pays,

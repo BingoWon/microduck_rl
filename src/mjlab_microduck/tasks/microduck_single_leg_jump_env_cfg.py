@@ -60,7 +60,7 @@ def make_microduck_single_leg_jump_env_cfg(
         jump_prob=0.75,
         fixed_mode=_fixed_play_mode() if play else -1,
         prepare_s=0.8,
-        crouch_s=0.22,
+        crouch_s=0.35,
         extend_s=0.12,
     )
 
@@ -93,9 +93,9 @@ def make_microduck_single_leg_jump_env_cfg(
         params={**jump_params, "target_height_gain": 0.01},
     )
     cfg.rewards["jump_compression_progress"] = RewardTermCfg(
-        func=microduck_mdp.single_leg_jump_compression_progress,
-        weight=0.5,
-        params={**jump_params, "target_compression": 0.01},
+        func=microduck_mdp.single_leg_jump_banked_compression_reward,
+        weight=5.0,
+        params={**jump_params, "compression_scale": 0.01},
     )
     cfg.rewards["jump_upward_progress"] = RewardTermCfg(
         func=microduck_mdp.single_leg_jump_upward_progress,
@@ -200,7 +200,6 @@ def make_microduck_single_leg_jump_env_cfg(
             },
         )
         for reward_name, initial_weight in (
-            ("jump_compression_progress", 0.5),
             ("jump_upward_progress", 0.5),
             ("jump_takeoff", 1.0),
             ("jump_landing", 1.0),

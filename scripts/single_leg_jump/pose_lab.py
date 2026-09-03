@@ -103,10 +103,17 @@ class PoseController:
         self.anchor_position = torch.zeros(3, device=env.device)
         self.reference_root_z = 0.0
         self.current_q = torch.zeros(14, device=env.device)
-        self.set_preset("left", 0.0)
+        self.set_neutral()
 
     def _site_id(self, side: str) -> int:
         return self.robot.find_sites(f"{side}_foot")[0][0]
+
+    def _anchor_point(self, side: str) -> torch.Tensor:
+        if side == "both":
+            left = self.robot.data.site_pos_w[0, self._site_id("left")]
+            right = self.robot.data.site_pos_w[0, self._site_id("right")]
+            return 0.5 * (left + right)
+        return self.robot.data.site_pos_w[0, self._site_id(side)]
 
     def _write(self) -> None:
         self.joint_pos[:, self.servo_ids] = self.current_q
@@ -122,9 +129,8 @@ class PoseController:
         self.env.sim.forward()
         self.env.scene.update(dt=0.0)
         if self.anchor_side != "free":
-            site_id = self._site_id(self.anchor_side)
             self.root_pose[:, :3] += (
-                self.anchor_position - self.robot.data.site_pos_w[0, site_id]
+                self.anchor_position - self._anchor_point(self.anchor_side)
             ).unsqueeze(0)
             self.robot.write_root_link_pose_to_sim(
                 self.root_pose,
@@ -167,16 +173,64 @@ class PoseController:
         self.reference_root_z = float(self.robot.data.root_link_pos_w[0, 2])
         self._write()
 
-    def set_joint_deg(self, index: int, value: float) -> None:
+    def set_neutral(self) -> None:
+        self.current_q = mdp._servo_default_joint_pos(
+            self.env,
+            self.robot,
+        )[0].clone()
+        self.root_pose = torch.tensor(
+            [[0.0, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0]],
+            device=self.env.device,
+        )
+        self.root_pose[:, :3] += self.env.scene.terrain.env_origins[self.env_ids]
+        self.anchor_side = "free"
+        self._write()
+        left = self.robot.data.site_pos_w[0, self._site_id("left")]
+        right = self.robot.data.site_pos_w[0, self._site_id("right")]
+        midpoint = 0.5 * (left + right)
+        origin = self.env.scene.terrain.env_origins[0]
+        self.root_pose[0, 0] += origin[0] - midpoint[0]
+        self.root_pose[0, 1] += origin[1] - midpoint[1]
+        self.root_pose[0, 2] += origin[2] - torch.minimum(left[2], right[2])
+        self._write()
+        self.anchor_side = "both"
+        self.anchor_position = self._anchor_point("both").clone()
+        self.reference_root_z = float(self.robot.data.root_link_pos_w[0, 2])
+
+    def set_symmetric_crouch(self, factor: float) -> None:
+        self.set_neutral()
+        for left_index, right_index in ((2, 11), (3, 12), (4, 13)):
+            delta = 0.5 * (
+                self.deltas["left"][left_index]
+                - self.deltas["right"][right_index]
+            )
+            self.current_q[left_index] += factor * delta
+            self.current_q[right_index] -= factor * delta
+        self._write()
+
+    def set_joint_deg(
+        self,
+        index: int,
+        value: float,
+        symmetric: bool = False,
+    ) -> None:
         self.current_q[index] = math.radians(value)
+        if symmetric and index < 5:
+            self.current_q[index + 9] = -self.current_q[index]
+        elif symmetric and index >= 9:
+            self.current_q[index - 9] = -self.current_q[index]
         self._write()
 
     def set_anchor(self, side: str) -> None:
         self.anchor_side = side
         if side != "free":
-            self.anchor_position = self.robot.data.site_pos_w[
-                0, self._site_id(side)
-            ].clone()
+            self.anchor_position = self._anchor_point(side).clone()
+        self._write()
+
+    def enforce_leg_symmetry(self) -> None:
+        self.current_q[9:14] = -self.current_q[0:5]
+        self.anchor_side = "both"
+        self.anchor_position = self._anchor_point("both").clone()
         self._write()
 
     def mirror(self) -> None:
@@ -195,9 +249,7 @@ class PoseController:
             else "free"
         )
         if self.anchor_side != "free":
-            self.anchor_position = self.robot.data.site_pos_w[
-                0, self._site_id(self.anchor_side)
-            ].clone()
+            self.anchor_position = self._anchor_point(self.anchor_side).clone()
         self._write()
 
     def metrics(self) -> dict:
@@ -239,6 +291,9 @@ class PoseLabViewer(ViserPlayViewer):
         self.controller = controller
         self.joint_handles = []
         self.status = None
+        self.anchor_handle = None
+        self.symmetry_handle = None
+        self.symmetry_locked = True
         self.updating_handles = False
 
     def setup(self) -> None:
@@ -249,6 +304,8 @@ class PoseLabViewer(ViserPlayViewer):
             preset = self._server.gui.add_button_group(
                 "预设姿态",
                 (
+                    "双腿正立",
+                    "双腿对称下蹲",
                     "左腿站立",
                     "左腿下蹲",
                     "右腿站立",
@@ -264,11 +321,17 @@ class PoseLabViewer(ViserPlayViewer):
                 initial_value=0.0,
                 hint="0为站立，2为深蹲参考，可连续拖动",
             )
+            symmetry = self._server.gui.add_checkbox(
+                "左右腿对称锁",
+                initial_value=True,
+            )
+            self.symmetry_handle = symmetry
             anchor = self._server.gui.add_dropdown(
                 "固定位置",
-                ("左脚", "右脚", "自由"),
-                initial_value="左脚",
+                ("双脚中心", "左脚", "右脚", "自由"),
+                initial_value="双脚中心",
             )
+            self.anchor_handle = anchor
             save = self._server.gui.add_button(
                 "保存当前姿态",
                 icon=viser.Icon.DEVICE_FLOPPY,
@@ -299,7 +362,12 @@ class PoseLabViewer(ViserPlayViewer):
                         if not self.updating_handles:
                             self.request_action(
                                 "CUSTOM",
-                                ("joint", joint_index, event.target.value),
+                                (
+                                    "joint",
+                                    joint_index,
+                                    event.target.value,
+                                    self.symmetry_locked,
+                                ),
                             )
 
                     self.joint_handles.append(handle)
@@ -307,6 +375,8 @@ class PoseLabViewer(ViserPlayViewer):
         @preset.on_click
         def _preset(event) -> None:
             mapping = {
+                "双腿正立": ("neutral",),
+                "双腿对称下蹲": ("symmetric_crouch", 2.0),
                 "左腿站立": ("preset", "left", 0.0),
                 "左腿下蹲": ("preset", "left", 2.0),
                 "右腿站立": ("preset", "right", 0.0),
@@ -317,6 +387,12 @@ class PoseLabViewer(ViserPlayViewer):
 
         @crouch.on_update
         def _crouch(event) -> None:
+            if self.symmetry_locked:
+                self.request_action(
+                    "CUSTOM",
+                    ("symmetric_crouch", event.target.value),
+                )
+                return
             side = (
                 self.controller.anchor_side
                 if self.controller.anchor_side in ("left", "right")
@@ -327,11 +403,22 @@ class PoseLabViewer(ViserPlayViewer):
                 ("preset", side, event.target.value),
             )
 
+        @symmetry.on_update
+        def _symmetry(event) -> None:
+            self.symmetry_locked = event.target.value
+            if self.symmetry_locked:
+                self.request_action("CUSTOM", ("enforce_symmetry",))
+
         @anchor.on_update
         def _anchor(event) -> None:
-            value = {"左脚": "left", "右脚": "right", "自由": "free"}[
-                event.target.value
-            ]
+            if self.updating_handles:
+                return
+            value = {
+                "双脚中心": "both",
+                "左脚": "left",
+                "右脚": "right",
+                "自由": "free",
+            }[event.target.value]
             self.request_action("CUSTOM", ("anchor", value))
 
         @save.on_click
@@ -345,13 +432,16 @@ class PoseLabViewer(ViserPlayViewer):
         self.updating_handles = True
         for index, handle in enumerate(self.joint_handles):
             handle.value = math.degrees(float(self.controller.current_q[index]))
-        self.updating_handles = False
         metrics = self.controller.metrics()
         anchor = {
+            "both": "双脚中心",
             "left": "左脚",
             "right": "右脚",
             "free": "自由",
         }[self.controller.anchor_side]
+        if self.anchor_handle is not None:
+            self.anchor_handle.value = anchor
+        self.updating_handles = False
         if self.status is not None:
             self.status.content = (
                 f"<b>物理已暂停</b><br>"
@@ -365,7 +455,17 @@ class PoseLabViewer(ViserPlayViewer):
             return super()._handle_custom_action(action, payload)
         kind = payload[0]
         if kind == "joint":
-            self.controller.set_joint_deg(payload[1], payload[2])
+            self.controller.set_joint_deg(
+                payload[1],
+                payload[2],
+                symmetric=payload[3],
+            )
+        elif kind == "neutral":
+            self.controller.set_neutral()
+        elif kind == "symmetric_crouch":
+            self.controller.set_symmetric_crouch(payload[1])
+        elif kind == "enforce_symmetry":
+            self.controller.enforce_leg_symmetry()
         elif kind == "preset":
             self.controller.set_preset(payload[1], payload[2])
         elif kind == "anchor":
